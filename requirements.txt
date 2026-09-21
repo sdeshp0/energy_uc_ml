@@ -1,0 +1,10 @@
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+scipy>=1.11
+matplotlib>=3.7
+streamlit>=1.30
+
+# Phase 2 (optional, for scaling to stochastic / rolling-horizon UC):
+# pyomo>=6.7
+# highspy>=1.7
