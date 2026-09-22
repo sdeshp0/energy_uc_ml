@@ -16,6 +16,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
+from unit_commitment import UnitCommitmentModel
+
 
 def fuel_adjusted_fleet(fleet: pd.DataFrame, coal_price: float, gas_price: float) -> pd.DataFrame:
     """Recompute marginal_cost from heat_rate x fuel price + var_om, at the given fuel prices."""
@@ -151,5 +153,113 @@ def plot_battery_soc(hours: np.ndarray, battery: pd.DataFrame, capacity_mwh: flo
     ax_power.set_title("Battery charge / discharge")
     ax_power.legend(loc="upper right", fontsize=8)
 
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity sweeps
+# ---------------------------------------------------------------------------
+
+def representative_day(df: pd.DataFrame, peak_residual_quantile: float = 0.75) -> tuple[np.ndarray, np.ndarray, str]:
+    """Pick a single day out of a multi-day synthetic dataset whose peak residual
+    load (demand - renewable) sits near the given quantile across all days --
+    e.g. 0.5 for a 'typical' day, 0.75 for a 'busy' day. Returns (demand, renewable, label)."""
+    d = df.copy()
+    d["renewable_mw"] = d["wind_mw"] + d["solar_mw"]
+    d["residual_mw"] = d["demand_mw"] - d["renewable_mw"]
+    d["day"] = d["timestamp"].dt.date
+    daily_peak = d.groupby("day")["residual_mw"].max()
+    target = daily_peak.quantile(peak_residual_quantile)
+    pick_day = (daily_peak - target).abs().idxmin()
+    day_df = d[d["day"] == pick_day].reset_index(drop=True)
+    label = f"{pick_day} (peak residual {daily_peak[pick_day]:.0f} MW, ~p{int(peak_residual_quantile*100)})"
+    return day_df["demand_mw"].values, day_df["renewable_mw"].values, label
+
+
+def run_sweep(base_fleet: pd.DataFrame, base_battery: dict, demand: np.ndarray, renewable: np.ndarray,
+              apply_fn, values: list, T: int = 24) -> pd.DataFrame:
+    """Generic sweep engine: for each v in values, apply_fn(base_fleet, base_battery, v)
+    returns a (fleet, battery) pair to solve with. Records cost, curtailment, unserved
+    demand, battery throughput, and per-generator energy for every point.
+
+    apply_fn is the only thing that changes between a fuel-price sweep and a
+    battery-parameter sweep -- everything else (solving, metric extraction) is shared.
+    """
+    rows = []
+    gen_names = list(base_fleet["name"])
+    for v in values:
+        fleet, battery = apply_fn(base_fleet, base_battery, v)
+        model = UnitCommitmentModel(fleet, battery, T=T)
+        res = model.build_and_solve(demand, renewable)
+        row = {"value": v, "status": res.status}
+        if res.status == "optimal":
+            energy_by_gen = res.dispatch.groupby("generator")["power_mw"].sum()
+            row.update({
+                "total_cost": res.total_cost,
+                "curtailment_mwh": res.curtailment.sum(),
+                "unserved_max_mw": res.unserved.max(),
+                "battery_throughput_mwh": res.battery["charge_mw"].sum() + res.battery["discharge_mw"].sum(),
+            })
+            for g in gen_names:
+                row[f"{g}_mwh"] = energy_by_gen.get(g, 0.0)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def sweep_fuel_price(base_fleet: pd.DataFrame, base_battery: dict, demand: np.ndarray, renewable: np.ndarray,
+                      fuel: str, price_range: np.ndarray, other_fuel_price: float) -> pd.DataFrame:
+    """Sweep one fuel's price (coal or gas) while holding the other fixed at other_fuel_price."""
+    def apply_fn(fleet, battery, v):
+        coal_p = v if fuel == "coal" else other_fuel_price
+        gas_p = v if fuel == "gas" else other_fuel_price
+        return fuel_adjusted_fleet(fleet, coal_p, gas_p), battery
+    return run_sweep(base_fleet, base_battery, demand, renewable, apply_fn, list(price_range))
+
+
+def sweep_battery_param(base_fleet: pd.DataFrame, base_battery: dict, demand: np.ndarray, renewable: np.ndarray,
+                         param: str, value_range: np.ndarray) -> pd.DataFrame:
+    """Sweep one battery parameter (e.g. 'power_mw', 'capacity_mwh', 'efficiency')
+    while holding the rest of the battery spec fixed."""
+    def apply_fn(fleet, battery, v):
+        return fleet, {**battery, param: v}
+    return run_sweep(base_fleet, base_battery, demand, renewable, apply_fn, list(value_range))
+
+
+def plot_sweep_cost(sweep_df: pd.DataFrame, x_label: str, title: str, baseline_value: float | None = None):
+    """Total cost (and, if present, curtailment) vs. the swept parameter."""
+    ok = sweep_df[sweep_df["status"] == "optimal"]
+    fig, ax1 = plt.subplots(figsize=(8, 4.5))
+    ax1.plot(ok["value"], ok["total_cost"], "o-", color="#2b6cb0", label="Total cost")
+    ax1.set_xlabel(x_label)
+    ax1.set_ylabel("Total cost ($)", color="#2b6cb0")
+    ax1.tick_params(axis="y", labelcolor="#2b6cb0")
+    if baseline_value is not None:
+        ax1.axvline(baseline_value, color="gray", linestyle=":", linewidth=1, label="Current slider value")
+
+    ax2 = ax1.twinx()
+    ax2.plot(ok["value"], ok["curtailment_mwh"], "s--", color="#38a169", alpha=0.7, label="Curtailment")
+    ax2.set_ylabel("Curtailment (MWh)", color="#38a169")
+    ax2.tick_params(axis="y", labelcolor="#38a169")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best", fontsize=8)
+    ax1.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_sweep_generation_mix(sweep_df: pd.DataFrame, gen_names: list[str], x_label: str, title: str):
+    """Stacked area chart: how the generation mix (MWh/day per unit) shifts across the sweep --
+    this is what actually shows a merit-order flip, not just the cost number moving."""
+    ok = sweep_df[sweep_df["status"] == "optimal"]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    cols = [f"{g}_mwh" for g in gen_names if f"{g}_mwh" in ok.columns]
+    ax.stackplot(ok["value"], [ok[c] for c in cols], labels=[c.replace("_mwh", "") for c in cols], alpha=0.85)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Energy (MWh/day)")
+    ax.set_title(title)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
     fig.tight_layout()
     return fig

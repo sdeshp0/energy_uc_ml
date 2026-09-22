@@ -34,16 +34,17 @@ with st.sidebar:
         help="p10 = conservative (assume less renewable than expected); "
              "p50 = median forecast; p90 = optimistic",
     )
-    n_days_history = st.slider("Days of training history", 60, 400, 200, step=20)
-    battery_power = st.slider("Battery power rating (MW)", 0, 150, 60, step=10)
-    battery_capacity = st.slider("Battery capacity (MWh)", 0, 500, 200, step=25)
+    n_days_history = st.slider("Days of training history", 60, 400, 200, step=20, key="n_days_history")
+    battery_power = st.slider("Battery power rating (MW)", 0, 150, 60, step=10, key="battery_power")
+    battery_capacity = st.slider("Battery capacity (MWh)", 0, 500, 200, step=25, key="battery_capacity")
 
     st.header("Thermal fleet: fuel prices")
-    coal_price = st.slider("Coal price ($/MMBtu)", 1.0, 8.0, 2.20, step=0.10)
-    gas_price = st.slider("Gas price ($/MMBtu)", 2.0, 12.0, 4.50, step=0.10,
+    coal_price = st.slider("Coal price ($/MMBtu)", 1.0, 8.0, 2.20, step=0.10, key="coal_price")
+    gas_price = st.slider("Gas price ($/MMBtu)", 2.0, 12.0, 4.50, step=0.10, key="gas_price",
                            help="All three gas units (both CCGTs + the peaker) share this price.")
 
     run_btn = st.button("Run pipeline", type="primary")
+    st.caption("See **Sensitivity Analysis** in the page nav above for parameter sweeps.")
 
 
 @st.cache_data
