@@ -121,3 +121,35 @@ def plot_residual_load(hours: np.ndarray, residual: np.ndarray, thermal_total: n
     ax.legend(loc="best", fontsize=9)
     fig.tight_layout()
     return fig
+
+
+def plot_battery_soc(hours: np.ndarray, battery: pd.DataFrame, capacity_mwh: float,
+                      soc_min_frac: float, soc_max_frac: float):
+    """State of charge over the day (top) plus charge/discharge power (bottom),
+    so you can see e.g. the battery running low late in the day, not just its
+    net contribution folded into the residual-load chart."""
+    fig, (ax_soc, ax_power) = plt.subplots(2, 1, figsize=(11, 5.5), sharex=True,
+                                            gridspec_kw={"height_ratios": [1, 1]})
+
+    ax_soc.fill_between(hours, 0, battery["soc_mwh"], step="mid", color="#805ad5", alpha=0.3)
+    ax_soc.plot(hours, battery["soc_mwh"], color="#805ad5", linewidth=2, drawstyle="steps-mid",
+                label="State of charge (MWh)")
+    ax_soc.axhline(soc_min_frac * capacity_mwh, color="gray", linestyle=":", linewidth=1,
+                   label=f"Min SoC ({soc_min_frac:.0%} of capacity)")
+    ax_soc.axhline(soc_max_frac * capacity_mwh, color="gray", linestyle="--", linewidth=1,
+                   label=f"Max SoC ({soc_max_frac:.0%} of capacity)")
+    ax_soc.set_ylabel("MWh")
+    ax_soc.set_title("Battery state of charge")
+    ax_soc.legend(loc="upper right", fontsize=8)
+    ax_soc.set_ylim(0, capacity_mwh * 1.05)
+
+    ax_power.bar(hours, battery["discharge_mw"], color="#38a169", label="Discharge (MW)", width=0.8)
+    ax_power.bar(hours, -battery["charge_mw"], color="#e53e3e", label="Charge (MW)", width=0.8)
+    ax_power.axhline(0, color="gray", linewidth=0.8)
+    ax_power.set_xlabel("Hour")
+    ax_power.set_ylabel("MW")
+    ax_power.set_title("Battery charge / discharge")
+    ax_power.legend(loc="upper right", fontsize=8)
+
+    fig.tight_layout()
+    return fig

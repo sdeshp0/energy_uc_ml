@@ -20,7 +20,7 @@ from forecasting import forecast_next_day
 from unit_commitment import UnitCommitmentModel
 from analysis import (
     fuel_adjusted_fleet, residual_load, thermal_and_battery_coverage,
-    ramp_headroom, plot_commitment_gantt, plot_residual_load,
+    ramp_headroom, plot_commitment_gantt, plot_residual_load, plot_battery_soc,
 )
 
 st.set_page_config(page_title="Energy UC + ML Dashboard", layout="wide")
@@ -126,6 +126,18 @@ resid = residual_load(r["demand"], r["chosen_renewable"])
 coverage = thermal_and_battery_coverage(dispatch, r["planned"].battery)
 fig_resid = plot_residual_load(hours, resid, coverage["thermal_total_mw"].values, coverage["battery_net_mw"].values)
 st.pyplot(fig_resid)
+
+st.subheader("Battery: state of charge")
+st.markdown(
+    "The battery has to plan ahead within the day: it can only discharge what it "
+    "already has stored, and can only store what its remaining headroom allows. "
+    "Watch how it charges during low-residual hours and discharges to cover the "
+    "evening peak."
+)
+battery_cfg = r["battery_spec"]
+fig_soc = plot_battery_soc(hours, r["planned"].battery, battery_cfg["capacity_mwh"],
+                            battery_cfg["soc_min_frac"], battery_cfg["soc_max_frac"])
+st.pyplot(fig_soc)
 
 st.subheader("Thermal fleet")
 st.markdown(
