@@ -85,24 +85,38 @@ def generate_hourly_dataset(n_days: int = 400, start_date: str = "2024-01-01") -
     return df
 
 
-def thermal_fleet_spec() -> pd.DataFrame:
+def thermal_fleet_spec(coal_price_per_mmbtu: float = 2.20,
+                        gas_price_per_mmbtu: float = 4.50) -> pd.DataFrame:
     """
-    A small, deliberately diversified thermal fleet:
-    baseload coal, mid-merit CCGT, flexible CCGT, and a fast gas peaker.
-    Costs are $/MWh (fuel + var O&M); startup costs in $.
+    A small, deliberately diversified thermal fleet: baseload coal, mid-merit
+    CCGT, flexible CCGT, and a fast gas peaker.
+
+    Cost is decomposed as heat_rate (MMBtu/MWh, how much fuel it takes to
+    make a MWh -- efficiency) x fuel_cost ($/MMBtu) + var_om ($/MWh), rather
+    than a single opaque marginal_cost number. This is what actually varies
+    across a real fleet: a peaker isn't expensive because someone set
+    "cost=78" -- it's expensive because its heat rate is worse (less
+    efficient) AND it burns the same, pricier, fuel as the CCGTs. Passing
+    different coal/gas prices lets you see the merit order shift, e.g. a
+    gas price spike making coal relatively more attractive.
     """
     fleet = pd.DataFrame(
         [
-            # name        pmin  pmax  marg_cost  startup_cost  ramp_mw_per_hr  min_up  min_down
-            ["Coal_1",     150,  400,     28.0,        15000,           80,        8,        8],
-            ["CCGT_1",      80,  250,     42.0,         6000,          120,        4,        3],
-            ["CCGT_2",      60,  200,     45.0,         5000,          120,        3,        3],
-            ["GasPeaker_1", 20,  100,     78.0,         1200,          100,        1,        1],
+            # name         pmin pmax heat_rate  fuel  var_om startup ramp  up down
+            ["Coal_1",      130, 350,    10.5, "coal",   3.0,  13000,  70,  8,   8],
+            ["CCGT_1",       70, 200,     7.0, "gas",    3.0,   4800,  95,  4,   3],
+            ["CCGT_2",       50, 150,     7.6, "gas",    3.0,   3750,  90,  3,   3],
+            ["GasPeaker_1",  20, 100,    11.5, "gas",    5.0,   1200, 100,  1,   1],
         ],
         columns=[
-            "name", "pmin_mw", "pmax_mw", "marginal_cost",
+            "name", "pmin_mw", "pmax_mw", "heat_rate_mmbtu_per_mwh", "fuel_type", "var_om_per_mwh",
             "startup_cost", "ramp_mw_per_hr", "min_up_hr", "min_down_hr",
         ],
+    )
+    price_map = {"coal": coal_price_per_mmbtu, "gas": gas_price_per_mmbtu}
+    fleet["fuel_cost_per_mmbtu"] = fleet["fuel_type"].map(price_map)
+    fleet["marginal_cost"] = (
+        fleet["heat_rate_mmbtu_per_mwh"] * fleet["fuel_cost_per_mmbtu"] + fleet["var_om_per_mwh"]
     )
     return fleet
 

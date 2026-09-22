@@ -55,9 +55,10 @@ class UnitCommitmentModel:
         self.battery = battery
 
         # Variable layout (flat vector x): blocks in this order, each length T (or G*T)
-        #   u[g,t]  : G*T   binary
-        #   p[g,t]  : G*T   continuous
-        #   s[g,t]  : G*T   binary
+        #   u[g,t]  : G*T   binary   commitment (on/off)
+        #   p[g,t]  : G*T   continuous  power output
+        #   s[g,t]  : G*T   binary   startup indicator
+        #   v[g,t]  : G*T   binary   shutdown indicator (enforces min-down-time)
         #   c[t]    : T     continuous (battery charge)
         #   d[t]    : T     continuous (battery discharge)
         #   soc[t]  : T     continuous (battery state of charge)
@@ -66,6 +67,7 @@ class UnitCommitmentModel:
         self.n_u = self.G * T
         self.n_p = self.G * T
         self.n_s = self.G * T
+        self.n_v = self.G * T
         self.n_c = T
         self.n_d = T
         self.n_soc = T
@@ -75,7 +77,8 @@ class UnitCommitmentModel:
         self.off_u = 0
         self.off_p = self.off_u + self.n_u
         self.off_s = self.off_p + self.n_p
-        self.off_c = self.off_s + self.n_s
+        self.off_v = self.off_s + self.n_s
+        self.off_c = self.off_v + self.n_v
         self.off_d = self.off_c + self.n_c
         self.off_soc = self.off_d + self.n_d
         self.off_curt = self.off_soc + self.n_soc
@@ -86,6 +89,7 @@ class UnitCommitmentModel:
     def iu(self, g, t): return self.off_u + g * self.T + t
     def ip(self, g, t): return self.off_p + g * self.T + t
     def is_(self, g, t): return self.off_s + g * self.T + t
+    def iv(self, g, t): return self.off_v + g * self.T + t
     def ic(self, t): return self.off_c + t
     def id_(self, t): return self.off_d + t
     def isoc(self, t): return self.off_soc + t
@@ -158,7 +162,6 @@ class UnitCommitmentModel:
                 row = np.zeros(self.n_vars)
                 row[self.is_(g, t)] = 1.0
                 row[self.iu(g, t)] = -1.0
-                prev = u_prev[g] if t == 0 else None
                 if t == 0:
                     rhs_lo = -u_prev[g]  # s - u >= -u_prev  =>  s >= u - u_prev
                     constraints.append(LinearConstraint(row, rhs_lo, np.inf))
@@ -166,11 +169,22 @@ class UnitCommitmentModel:
                     row[self.iu(g, t - 1)] = 1.0
                     constraints.append(LinearConstraint(row, 0.0, np.inf))
 
-        # ---------- minimum up/down time ----------
+        # ---------- shutdown linking: v[g,t] >= u[g,t-1] - u[g,t] ----------
+        for g in range(G):
+            for t in range(T):
+                row = np.zeros(self.n_vars)
+                row[self.iv(g, t)] = 1.0
+                row[self.iu(g, t)] = 1.0
+                if t == 0:
+                    rhs_lo = u_prev[g]  # v + u >= u_prev  =>  v >= u_prev - u
+                    constraints.append(LinearConstraint(row, rhs_lo, np.inf))
+                else:
+                    row[self.iu(g, t - 1)] = -1.0
+                    constraints.append(LinearConstraint(row, 0.0, np.inf))
+
+        # ---------- minimum up-time: if started within min_up hours of t, must still be on ----------
         for g in range(G):
             min_up = int(fleet.loc[g, "min_up_hr"])
-            min_down = int(fleet.loc[g, "min_down_hr"])
-            # up-time: if unit starts at t, it must stay on for min_up hours
             for t in range(T):
                 window = range(max(0, t - min_up + 1), t + 1)
                 row = np.zeros(self.n_vars)
@@ -178,9 +192,17 @@ class UnitCommitmentModel:
                     row[self.is_(g, i)] = 1.0
                 row[self.iu(g, t)] = -1.0
                 constraints.append(LinearConstraint(row, -np.inf, 0.0))
-            # down-time: approximate via shutdown implied by -delta u; kept simple
-            # (sufficient for a portfolio-scale demo; full shutdown-indicator
-            # formulation is a natural Phase-2 refinement)
+
+        # ---------- minimum down-time: if shut down within min_down hours of t, must still be off ----------
+        for g in range(G):
+            min_down = int(fleet.loc[g, "min_down_hr"])
+            for t in range(T):
+                window = range(max(0, t - min_down + 1), t + 1)
+                row = np.zeros(self.n_vars)
+                for i in window:
+                    row[self.iv(g, i)] = 1.0
+                row[self.iu(g, t)] = 1.0
+                constraints.append(LinearConstraint(row, -np.inf, 1.0))
 
         # ---------- ramp limits ----------
         for g in range(G):
@@ -223,6 +245,8 @@ class UnitCommitmentModel:
                 ub[self.iu(g, t)] = 1
                 integrality[self.is_(g, t)] = 1
                 ub[self.is_(g, t)] = 1
+                integrality[self.iv(g, t)] = 1
+                ub[self.iv(g, t)] = 1
                 ub[self.ip(g, t)] = fleet.loc[g, "pmax_mw"]
 
         for t in range(T):
@@ -261,6 +285,7 @@ class UnitCommitmentModel:
                     "on": round(x[self.iu(g, t)]),
                     "power_mw": x[self.ip(g, t)],
                     "startup": round(x[self.is_(g, t)]),
+                    "shutdown": round(x[self.iv(g, t)]),
                 })
         dispatch = pd.DataFrame(rows)
 
@@ -298,3 +323,4 @@ if __name__ == "__main__":
     print("Total curtailment (MWh):", result.curtailment.sum())
     print("\nBattery:")
     print(result.battery.to_string(index=False))
+    
