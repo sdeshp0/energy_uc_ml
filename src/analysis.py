@@ -263,3 +263,93 @@ def plot_sweep_generation_mix(sweep_df: pd.DataFrame, gen_names: list[str], x_la
     ax.legend(loc="upper left", fontsize=8, ncol=2)
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Market price / revenue reporting (Option A) + battery arbitrage support
+# ---------------------------------------------------------------------------
+
+def generator_economics(dispatch: pd.DataFrame, fleet: pd.DataFrame, price: np.ndarray) -> pd.DataFrame:
+    """Per-generator revenue (at the simulated price), fuel+var-O&M cost, startup
+    cost, and margin. This is a reporting lens applied AFTER solving -- the
+    generators are still dispatched purely to minimize production cost; this just
+    asks what that dispatch would have been worth at market price. Expect the
+    marginal (most expensive committed) unit's margin to sit near zero and
+    inframarginal (cheaper) units to show a healthy margin -- classic merit-order
+    economics, and a good sanity check that the price series is behaving sensibly.
+    """
+    fleet_idx = fleet.set_index("name")
+    rows = []
+    for g, grp in dispatch.groupby("generator"):
+        grp = grp.sort_values("hour")
+        mc = fleet_idx.loc[g, "marginal_cost"]
+        startup_cost = fleet_idx.loc[g, "startup_cost"]
+        hours = grp["hour"].values
+        revenue = (grp["power_mw"].values * price[hours]).sum()
+        fuel_var_om_cost = (grp["power_mw"].values * mc).sum()
+        total_startup_cost = grp["startup"].sum() * startup_cost
+        rows.append({
+            "generator": g,
+            "energy_mwh": grp["power_mw"].sum(),
+            "revenue": revenue,
+            "fuel_var_om_cost": fuel_var_om_cost,
+            "startup_cost": total_startup_cost,
+            "margin": revenue - fuel_var_om_cost - total_startup_cost,
+        })
+    return pd.DataFrame(rows).sort_values("margin", ascending=False).reset_index(drop=True)
+
+
+def battery_economics(battery: pd.DataFrame, price: np.ndarray) -> pd.DataFrame:
+    """Per-hour battery charging cost, discharging revenue, net P&L, and running
+    cumulative P&L against the simulated price series."""
+    b = battery.copy().reset_index(drop=True)
+    hours = b["hour"].values
+    b["charge_cost"] = b["charge_mw"] * price[hours]
+    b["discharge_revenue"] = b["discharge_mw"] * price[hours]
+    b["net_pnl"] = b["discharge_revenue"] - b["charge_cost"]
+    b["cumulative_pnl"] = b["net_pnl"].cumsum()
+    return b
+
+
+def plot_price_and_residual(hours: np.ndarray, price: np.ndarray, residual: np.ndarray):
+    """Simulated price alongside residual load -- shows the price signal tracking scarcity."""
+    fig, ax1 = plt.subplots(figsize=(11, 4))
+    ax1.plot(hours, price, color="#d69e2e", linewidth=2, marker="o", markersize=3, label="Simulated price ($/MWh)")
+    ax1.axhline(0, color="gray", linewidth=0.8)
+    ax1.set_ylabel("$/MWh", color="#d69e2e")
+    ax1.tick_params(axis="y", labelcolor="#d69e2e")
+    ax1.set_xlabel("Hour")
+    ax2 = ax1.twinx()
+    ax2.plot(hours, residual, "k--", linewidth=1.5, alpha=0.7, label="Residual load (MW)")
+    ax2.set_ylabel("MW")
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=8)
+    ax1.set_title("Simulated electricity price vs. residual load")
+    fig.tight_layout()
+    return fig
+
+
+def plot_battery_pnl(hours: np.ndarray, battery_econ: pd.DataFrame, price: np.ndarray):
+    """Hourly battery cost/revenue against price (top) and cumulative P&L (bottom)."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 5.5), sharex=True)
+
+    ax1.bar(hours, battery_econ["discharge_revenue"], color="#38a169", label="Discharge revenue", width=0.8)
+    ax1.bar(hours, -battery_econ["charge_cost"], color="#e53e3e", label="Charge cost", width=0.8)
+    ax1.axhline(0, color="gray", linewidth=0.8)
+    ax1.set_ylabel("$")
+    ax1.set_title("Battery hourly cost / revenue vs. price")
+    ax1b = ax1.twinx()
+    ax1b.plot(hours, price, color="#d69e2e", linewidth=1.5, alpha=0.8, label="Price")
+    ax1b.set_ylabel("$/MWh", color="#d69e2e")
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1b.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=8)
+
+    ax2.plot(hours, battery_econ["cumulative_pnl"], color="#2b6cb0", linewidth=2)
+    ax2.axhline(0, color="gray", linewidth=0.8)
+    ax2.set_xlabel("Hour")
+    ax2.set_ylabel("Cumulative $")
+    ax2.set_title("Battery cumulative P&L")
+    fig.tight_layout()
+    return fig

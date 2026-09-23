@@ -99,7 +99,8 @@ class UnitCommitmentModel:
     def build_and_solve(self, demand: np.ndarray, renewable_mw: np.ndarray,
                          u_prev: np.ndarray | None = None,
                          unserved_penalty: float = 5000.0,
-                         fixed_commitment: np.ndarray | None = None) -> UCResult:
+                         fixed_commitment: np.ndarray | None = None,
+                         price: np.ndarray | None = None) -> UCResult:
         """
         demand: length-T array of demand (MW)
         renewable_mw: length-T array of available wind+solar (MW), pre-summed
@@ -108,6 +109,17 @@ class UnitCommitmentModel:
             value instead of being optimized -- used to evaluate the REALIZED cost of a
             day-ahead commitment schedule once actual renewables are known, as opposed to
             the (potentially misleading) planned cost computed under the forecast.
+        price: optional length-T array ($/MWh). When given, adds price[t]*charge[t] as a
+            cost and price[t]*discharge[t] as a revenue credit (negative cost) to the
+            objective -- a battery arbitrage incentive layered ON TOP OF production-cost
+            minimization, not a replacement for it. This is a deliberately blended
+            objective (minimize production cost, minus battery arbitrage revenue against
+            an exogenous price), not a rigorous merchant/market reformulation: the
+            resulting total_cost mixes true production cost with this arbitrage term, so
+            it is NOT directly comparable to a total_cost from a price=None solve. For a
+            fair comparison, recompute true production cost from the dispatch (e.g. via
+            analysis.generator_economics) rather than reading UCResult.total_cost when
+            price is used.
         """
         T, G, fleet = self.T, self.G, self.fleet
         if u_prev is None:
@@ -121,6 +133,10 @@ class UnitCommitmentModel:
                 c_obj[self.is_(g, t)] = fleet.loc[g, "startup_cost"]
         for t in range(T):
             c_obj[self.iunserved(t)] = unserved_penalty
+        if price is not None:
+            for t in range(T):
+                c_obj[self.ic(t)] += price[t]    # cost to charge (buying energy at market price)
+                c_obj[self.id_(t)] += -price[t]  # revenue credit for discharging (selling at market price)
 
         constraints = []
 
@@ -323,4 +339,3 @@ if __name__ == "__main__":
     print("Total curtailment (MWh):", result.curtailment.sum())
     print("\nBattery:")
     print(result.battery.to_string(index=False))
-    

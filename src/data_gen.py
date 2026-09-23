@@ -132,6 +132,50 @@ def battery_spec() -> dict:
     }
 
 
+def simulate_price_series(demand_mw: np.ndarray, renewable_mw: np.ndarray, fleet: pd.DataFrame,
+                           oversupply_floor: float = -15.0, scarcity_cap: float = 220.0,
+                           noise_std: float = 4.0, rng: np.random.Generator | None = None) -> np.ndarray:
+    """
+    Simulated hourly day-ahead electricity price -- an EXOGENOUS signal, not the
+    literal shadow price of the UC solve. It's derived from a simplified merit-order
+    stack of the thermal fleet (sorted by marginal cost): price = the marginal cost
+    of the last unit needed to cover that hour's residual load (demand - renewable).
+
+    This is deliberately independent of the UC's actual commitment/ramp/min-up-down
+    constraints -- the point is to give the battery (and the reporting layer) a price
+    signal it can react to that isn't circularly derived from the same optimization
+    it's meant to influence. Real day-ahead prices are computed similarly in
+    practice (marginal cost of the marginal unit), typically as the dual/shadow
+    price of the full unit commitment + economic dispatch problem -- computing it
+    that way here would make the "signal" and the "solve" the same thing, which
+    defeats the purpose for the battery-arbitrage use case.
+
+    residual <= 0 (renewable oversupply): price collapses toward oversupply_floor,
+    scaling with the size of the oversupply -- a proxy for negative/near-zero
+    pricing during curtailment events.
+    residual > total fleet capacity: price caps at scarcity_cap (a simple
+    value-of-lost-load-style ceiling).
+    """
+    if rng is None:
+        rng = np.random.default_rng(7)
+    residual = demand_mw - renewable_mw
+    order = fleet.sort_values("marginal_cost")
+    cum_cap = order["pmax_mw"].cumsum().values
+    marginal_costs = order["marginal_cost"].values
+
+    prices = np.empty(len(residual))
+    for i, r in enumerate(residual):
+        if r <= 0:
+            oversupply_frac = min(1.0, -r / 200.0)
+            prices[i] = oversupply_floor * oversupply_frac
+        else:
+            idx = np.searchsorted(cum_cap, r)
+            prices[i] = scarcity_cap if idx >= len(marginal_costs) else marginal_costs[idx]
+
+    prices = prices + rng.normal(0, noise_std, size=len(prices))
+    return np.clip(prices, oversupply_floor, scarcity_cap)
+
+
 if __name__ == "__main__":
     from pathlib import Path
 
