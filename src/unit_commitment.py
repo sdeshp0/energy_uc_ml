@@ -318,6 +318,313 @@ class UnitCommitmentModel:
         return UCResult("optimal", res.fun, dispatch, battery, curt, unserved)
 
 
+@dataclass
+class ScenarioOutcome:
+    """Recourse (second-stage) outcome for one scenario, under the shared commitment."""
+    probability: float
+    demand_label: str
+    renewable_label: str
+    cost: float  # shared startup cost + this scenario's recourse cost, i.e. "if this
+                 # scenario happens, given the commitment we chose, total cost would be..."
+    dispatch: pd.DataFrame
+    battery: pd.DataFrame
+    curtailment: np.ndarray
+    unserved: np.ndarray
+
+
+@dataclass
+class StochasticUCResult:
+    status: str
+    expected_cost: float       # startup cost + probability-weighted expected recourse cost
+                                # (this is exactly the MILP's objective value)
+    startup_cost: float        # first-stage, paid once regardless of which scenario happens
+    commitment: pd.DataFrame   # shared on/off schedule: generator, hour, on, startup
+    scenarios: list[ScenarioOutcome]
+
+
+class StochasticUnitCommitmentModel:
+    """
+    Two-stage stochastic unit commitment: ONE shared commitment schedule
+    (u/s/v -- decided before any scenario is known, matching how day-ahead UC
+    actually works, since startup lead times mean you can't wait to see what
+    demand/renewables actually do) but scenario-specific recourse (power
+    output, battery operation, curtailment, unserved energy -- decided in
+    real time once the scenario resolves). The objective minimizes shared
+    startup cost plus the PROBABILITY-WEIGHTED EXPECTED recourse cost across
+    scenarios.
+
+    This is deliberately different from -- and more correct than -- solving
+    each scenario independently with UnitCommitmentModel and combining the
+    results afterward: independent solves would each pick their own
+    commitment schedule, and you cannot fractionally blend several different
+    discrete on/off decisions into one implementable plan. Here there is
+    exactly one commitment decision, chosen to perform well in expectation
+    across every scenario simultaneously.
+    """
+
+    def __init__(self, fleet: pd.DataFrame, battery: dict, scenarios: list[dict], T: int = 24):
+        """scenarios: list of dicts, each with 'probability' (float), 'demand' (length-T
+        array), 'renewable' (length-T array), and optionally 'demand_label'/'renewable_label'
+        for reporting. Probabilities should sum to ~1 (not enforced, but the objective's
+        expected-cost interpretation only holds if they do)."""
+        self.fleet = fleet.reset_index(drop=True)
+        self.G = len(fleet)
+        self.T = T
+        self.battery = battery
+        self.scenarios = scenarios
+        self.W = len(scenarios)
+
+        G, T, W = self.G, self.T, self.W
+        # First-stage (shared across scenarios): u, s, v -- G*T each
+        self.n_u = G * T
+        self.n_s = G * T
+        self.n_v = G * T
+        # Second-stage (per scenario): p is G*T*W; c/d/soc/curt/unserved are T*W each
+        self.n_p = G * T * W
+        self.n_c = T * W
+        self.n_d = T * W
+        self.n_soc = T * W
+        self.n_curt = T * W
+        self.n_unserved = T * W
+
+        self.off_u = 0
+        self.off_s = self.off_u + self.n_u
+        self.off_v = self.off_s + self.n_s
+        self.off_p = self.off_v + self.n_v
+        self.off_c = self.off_p + self.n_p
+        self.off_d = self.off_c + self.n_c
+        self.off_soc = self.off_d + self.n_d
+        self.off_curt = self.off_soc + self.n_soc
+        self.off_unserved = self.off_curt + self.n_curt
+        self.n_vars = self.off_unserved + self.n_unserved
+
+    # -- index helpers -- first-stage (g,t); second-stage (g,t,w) or (t,w)
+    def iu(self, g, t): return self.off_u + g * self.T + t
+    def is_(self, g, t): return self.off_s + g * self.T + t
+    def iv(self, g, t): return self.off_v + g * self.T + t
+    def ip(self, g, t, w): return self.off_p + (g * self.T + t) * self.W + w
+    def ic(self, t, w): return self.off_c + t * self.W + w
+    def id_(self, t, w): return self.off_d + t * self.W + w
+    def isoc(self, t, w): return self.off_soc + t * self.W + w
+    def icurt(self, t, w): return self.off_curt + t * self.W + w
+    def iunserved(self, t, w): return self.off_unserved + t * self.W + w
+
+    def build_and_solve(self, u_prev: np.ndarray | None = None,
+                         unserved_penalty: float = 5000.0) -> StochasticUCResult:
+        T, G, W, fleet = self.T, self.G, self.W, self.fleet
+        if u_prev is None:
+            u_prev = np.zeros(G)
+        probs = np.array([s["probability"] for s in self.scenarios])
+
+        # ---------- objective: shared startup cost + probability-weighted expected recourse ----------
+        c_obj = np.zeros(self.n_vars)
+        for g in range(G):
+            for t in range(T):
+                c_obj[self.is_(g, t)] = fleet.loc[g, "startup_cost"]
+        for w in range(W):
+            for g in range(G):
+                for t in range(T):
+                    c_obj[self.ip(g, t, w)] = probs[w] * fleet.loc[g, "marginal_cost"]
+            for t in range(T):
+                c_obj[self.iunserved(t, w)] = probs[w] * unserved_penalty
+
+        constraints = []
+
+        # ---------- power balance per (t,w) ----------
+        for w in range(W):
+            demand_w, renewable_w = self.scenarios[w]["demand"], self.scenarios[w]["renewable"]
+            for t in range(T):
+                row = np.zeros(self.n_vars)
+                for g in range(G):
+                    row[self.ip(g, t, w)] = 1.0
+                row[self.icurt(t, w)] = -1.0
+                row[self.id_(t, w)] = 1.0
+                row[self.ic(t, w)] = -1.0
+                row[self.iunserved(t, w)] = 1.0
+                rhs = demand_w[t] - renewable_w[t]
+                constraints.append(LinearConstraint(row, rhs, rhs))
+
+                # curtailment bound: curt[t,w] <= renewable[w][t]
+                row2 = np.zeros(self.n_vars)
+                row2[self.icurt(t, w)] = 1.0
+                constraints.append(LinearConstraint(row2, -np.inf, max(renewable_w[t], 0.0)))
+
+        # ---------- generator output linked to SHARED commitment, per (g,t,w) ----------
+        for g in range(G):
+            pmin, pmax = fleet.loc[g, "pmin_mw"], fleet.loc[g, "pmax_mw"]
+            for t in range(T):
+                for w in range(W):
+                    row_hi = np.zeros(self.n_vars)
+                    row_hi[self.ip(g, t, w)] = 1.0
+                    row_hi[self.iu(g, t)] = -pmax
+                    constraints.append(LinearConstraint(row_hi, -np.inf, 0.0))
+
+                    row_lo = np.zeros(self.n_vars)
+                    row_lo[self.ip(g, t, w)] = 1.0
+                    row_lo[self.iu(g, t)] = -pmin
+                    constraints.append(LinearConstraint(row_lo, 0.0, np.inf))
+
+        # ---------- startup/shutdown linking -- first-stage only, no scenario dependence ----------
+        for g in range(G):
+            for t in range(T):
+                row_s = np.zeros(self.n_vars)
+                row_s[self.is_(g, t)] = 1.0
+                row_s[self.iu(g, t)] = -1.0
+                if t == 0:
+                    constraints.append(LinearConstraint(row_s, -u_prev[g], np.inf))
+                else:
+                    row_s[self.iu(g, t - 1)] = 1.0
+                    constraints.append(LinearConstraint(row_s, 0.0, np.inf))
+
+                row_v = np.zeros(self.n_vars)
+                row_v[self.iv(g, t)] = 1.0
+                row_v[self.iu(g, t)] = 1.0
+                if t == 0:
+                    constraints.append(LinearConstraint(row_v, u_prev[g], np.inf))
+                else:
+                    row_v[self.iu(g, t - 1)] = -1.0
+                    constraints.append(LinearConstraint(row_v, 0.0, np.inf))
+
+        # ---------- min up/down time -- first-stage only ----------
+        for g in range(G):
+            min_up = int(fleet.loc[g, "min_up_hr"])
+            min_down = int(fleet.loc[g, "min_down_hr"])
+            for t in range(T):
+                window_up = range(max(0, t - min_up + 1), t + 1)
+                row = np.zeros(self.n_vars)
+                for i in window_up:
+                    row[self.is_(g, i)] = 1.0
+                row[self.iu(g, t)] = -1.0
+                constraints.append(LinearConstraint(row, -np.inf, 0.0))
+
+                window_down = range(max(0, t - min_down + 1), t + 1)
+                row2 = np.zeros(self.n_vars)
+                for i in window_down:
+                    row2[self.iv(g, i)] = 1.0
+                row2[self.iu(g, t)] = 1.0
+                constraints.append(LinearConstraint(row2, -np.inf, 1.0))
+
+        # ---------- ramp limits, per scenario (must hold along whichever path materializes) ----------
+        for g in range(G):
+            ramp = fleet.loc[g, "ramp_mw_per_hr"]
+            for w in range(W):
+                for t in range(1, T):
+                    row_up = np.zeros(self.n_vars)
+                    row_up[self.ip(g, t, w)] = 1.0
+                    row_up[self.ip(g, t - 1, w)] = -1.0
+                    constraints.append(LinearConstraint(row_up, -np.inf, ramp))
+
+                    row_dn = np.zeros(self.n_vars)
+                    row_dn[self.ip(g, t, w)] = 1.0
+                    row_dn[self.ip(g, t - 1, w)] = -1.0
+                    constraints.append(LinearConstraint(row_dn, -ramp, np.inf))
+
+        # ---------- battery dynamics, per scenario (same known starting SoC for all) ----------
+        cap = self.battery["capacity_mwh"]
+        eff = self.battery["efficiency"]
+        soc0 = self.battery["soc_init_frac"] * cap
+        for w in range(W):
+            for t in range(T):
+                row = np.zeros(self.n_vars)
+                row[self.isoc(t, w)] = 1.0
+                row[self.ic(t, w)] = -eff
+                row[self.id_(t, w)] = 1.0 / eff
+                if t == 0:
+                    rhs = soc0
+                else:
+                    row[self.isoc(t - 1, w)] = -1.0
+                    rhs = 0.0
+                constraints.append(LinearConstraint(row, rhs, rhs))
+
+        # ---------- bounds ----------
+        lb = np.zeros(self.n_vars)
+        ub = np.full(self.n_vars, np.inf)
+        integrality = np.zeros(self.n_vars)
+
+        for g in range(G):
+            for t in range(T):
+                integrality[self.iu(g, t)] = 1
+                ub[self.iu(g, t)] = 1
+                integrality[self.is_(g, t)] = 1
+                ub[self.is_(g, t)] = 1
+                integrality[self.iv(g, t)] = 1
+                ub[self.iv(g, t)] = 1
+                for w in range(W):
+                    ub[self.ip(g, t, w)] = fleet.loc[g, "pmax_mw"]
+
+        for w in range(W):
+            for t in range(T):
+                ub[self.ic(t, w)] = self.battery["power_mw"]
+                ub[self.id_(t, w)] = self.battery["power_mw"]
+                lb[self.isoc(t, w)] = self.battery["soc_min_frac"] * cap
+                ub[self.isoc(t, w)] = self.battery["soc_max_frac"] * cap
+
+        bounds = Bounds(lb, ub)
+
+        res = milp(c_obj, constraints=constraints, integrality=integrality,
+                   bounds=bounds, options={"time_limit": 120})
+
+        return self._package_result(res, probs, unserved_penalty)
+
+    def _package_result(self, res, probs, unserved_penalty) -> StochasticUCResult:
+        if not res.success:
+            return StochasticUCResult("infeasible_or_failed", np.nan, np.nan, pd.DataFrame(), [])
+
+        x = res.x
+        T, G, W, fleet = self.T, self.G, self.W, self.fleet
+
+        commitment_rows = []
+        startup_cost_total = 0.0
+        for g in range(G):
+            for t in range(T):
+                on = round(x[self.iu(g, t)])
+                startup = round(x[self.is_(g, t)])
+                commitment_rows.append({
+                    "generator": fleet.loc[g, "name"], "hour": t, "on": on, "startup": startup,
+                })
+                startup_cost_total += startup * fleet.loc[g, "startup_cost"]
+        commitment = pd.DataFrame(commitment_rows)
+
+        scenario_outcomes = []
+        for w in range(W):
+            dispatch_rows = []
+            for g in range(G):
+                for t in range(T):
+                    dispatch_rows.append({
+                        "generator": fleet.loc[g, "name"], "hour": t,
+                        "on": round(x[self.iu(g, t)]),
+                        "power_mw": x[self.ip(g, t, w)],
+                        "startup": round(x[self.is_(g, t)]),
+                    })
+            dispatch = pd.DataFrame(dispatch_rows)
+            battery_df = pd.DataFrame({
+                "hour": range(T),
+                "charge_mw": [x[self.ic(t, w)] for t in range(T)],
+                "discharge_mw": [x[self.id_(t, w)] for t in range(T)],
+                "soc_mwh": [x[self.isoc(t, w)] for t in range(T)],
+            })
+            curt = np.array([x[self.icurt(t, w)] for t in range(T)])
+            unserved = np.array([x[self.iunserved(t, w)] for t in range(T)])
+
+            recourse_cost = sum(
+                x[self.ip(g, t, w)] * fleet.loc[g, "marginal_cost"] for g in range(G) for t in range(T)
+            ) + unserved.sum() * unserved_penalty
+            scenario_cost = startup_cost_total + recourse_cost
+
+            scenario_outcomes.append(ScenarioOutcome(
+                probability=self.scenarios[w]["probability"],
+                demand_label=self.scenarios[w].get("demand_label", f"scenario_{w}"),
+                renewable_label=self.scenarios[w].get("renewable_label", ""),
+                cost=scenario_cost, dispatch=dispatch, battery=battery_df,
+                curtailment=curt, unserved=unserved,
+            ))
+
+        return StochasticUCResult(
+            status="optimal", expected_cost=res.fun, startup_cost=startup_cost_total,
+            commitment=commitment, scenarios=scenario_outcomes,
+        )
+
+
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, ".")
@@ -339,3 +646,4 @@ if __name__ == "__main__":
     print("Total curtailment (MWh):", result.curtailment.sum())
     print("\nBattery:")
     print(result.battery.to_string(index=False))
+    

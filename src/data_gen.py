@@ -61,10 +61,25 @@ def generate_hourly_dataset(n_days: int = 400, start_date: str = "2024-01-01") -
     weekend_derate = np.where(dow >= 5, 0.92, 1.0)
     demand_noise = RNG.normal(0, 0.03, n)
     demand_mw = 1000 * demand_shape * weekend_derate + 1000 * demand_noise
-    demand_mw = np.clip(demand_mw, 400, None)
 
     solar_cf = np.clip(_solar_shape(hour, day_of_year) + RNG.normal(0, 0.04, n), 0, 1)
     wind_cf = _wind_shape(n, day_of_year)
+
+    # Correlated weather shock ("cold snap"): a small fraction of days get a
+    # simultaneous demand spike (extra heating/cooling load) AND a wind drought
+    # (the still-air, high-pressure pattern that commonly accompanies a cold
+    # snap) -- the classic correlated tail risk in power systems (e.g. Texas,
+    # Feb 2021), and specifically the kind of event an independence assumption
+    # between demand and renewable forecast errors would understate. Without
+    # this, demand/wind/solar here are independent stochastic processes with
+    # no shared driver, so there's nothing for a joint (non-independence)
+    # scenario model to actually find -- see scenarios.py.
+    cold_snap_day = RNG.random(n_days) < 0.05
+    cold_snap_hourly = np.repeat(cold_snap_day, 24)
+    demand_mw = demand_mw * np.where(cold_snap_hourly, 1.16, 1.0)
+    wind_cf = np.clip(wind_cf * np.where(cold_snap_hourly, 0.4, 1.0), 0.02, 1.0)
+
+    demand_mw = np.clip(demand_mw, 400, None)
 
     WIND_CAPACITY_MW = 300
     SOLAR_CAPACITY_MW = 250
