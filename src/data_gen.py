@@ -19,10 +19,14 @@ RNG = np.random.default_rng(42)
 
 
 def _diurnal_demand_shape(hour: np.ndarray) -> np.ndarray:
-    """Two-peak (morning/evening) daily demand shape, normalized ~[0.6, 1.0]."""
-    morning = 0.15 * np.exp(-((hour - 8) ** 2) / (2 * 2.5**2))
-    evening = 0.25 * np.exp(-((hour - 19) ** 2) / (2 * 3.0**2))
-    base = 0.65
+    """Two-peak (morning/evening) daily demand shape, normalized ~[0.5, 0.95].
+    A deeper trough / higher evening peak than a gentler curve would give --
+    deliberately, so there's a real daily swing for battery/peaker flexibility
+    to do something with, rather than a nearly-flat load that makes storage
+    sizing barely matter."""
+    morning = 0.18 * np.exp(-((hour - 8) ** 2) / (2 * 2.5**2))
+    evening = 0.38 * np.exp(-((hour - 19) ** 2) / (2 * 3.0**2))
+    base = 0.50
     return base + morning + evening
 
 
