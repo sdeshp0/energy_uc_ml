@@ -100,7 +100,9 @@ class UnitCommitmentModel:
                          u_prev: np.ndarray | None = None,
                          unserved_penalty: float = 5000.0,
                          fixed_commitment: np.ndarray | None = None,
-                         price: np.ndarray | None = None) -> UCResult:
+                         price: np.ndarray | None = None,
+                         soc_init_mwh: float | None = None,
+                         soc_terminal_min_mwh: float | None = None) -> UCResult:
         """
         demand: length-T array of demand (MW)
         renewable_mw: length-T array of available wind+solar (MW), pre-summed
@@ -109,6 +111,20 @@ class UnitCommitmentModel:
             value instead of being optimized -- used to evaluate the REALIZED cost of a
             day-ahead commitment schedule once actual renewables are known, as opposed to
             the (potentially misleading) planned cost computed under the forecast.
+        soc_init_mwh: optional starting battery state of charge (MWh) at t=0. Defaults to
+            None, which uses battery["soc_init_frac"] * capacity as before (a fixed
+            starting point every solve). Pass the previous day's ENDING soc here when
+            chaining solves across days (rolling-horizon simulation) so the battery's
+            state actually carries over instead of resetting each day.
+        soc_terminal_min_mwh: optional floor on soc[T-1] (the LAST hour's state of
+            charge). Without this, a finite-horizon solve has no incentive to end
+            with any charge above the physical minimum -- stored energy has no
+            explicit value in the objective, so the optimizer will drain the
+            battery by the final hours whenever that's weakly cost-reducing. Fine
+            for a single isolated day, but fatal for a rolling multi-day
+            simulation: every day would start crippled at the floor. Pass e.g.
+            battery["soc_init_frac"] * capacity here to require each day end back
+            at a normal operating level for the next day to start from.
         price: optional length-T array ($/MWh). When given, adds price[t]*charge[t] as a
             cost and price[t]*discharge[t] as a revenue credit (negative cost) to the
             objective -- a battery arbitrage incentive layered ON TOP OF production-cost
@@ -237,7 +253,7 @@ class UnitCommitmentModel:
         # ---------- battery dynamics ----------
         cap = self.battery["capacity_mwh"]
         eff = self.battery["efficiency"]
-        soc0 = self.battery["soc_init_frac"] * cap
+        soc0 = soc_init_mwh if soc_init_mwh is not None else self.battery["soc_init_frac"] * cap
         for t in range(T):
             row = np.zeros(self.n_vars)
             row[self.isoc(t)] = 1.0
@@ -249,6 +265,11 @@ class UnitCommitmentModel:
                 row[self.isoc(t - 1)] = -1.0
                 rhs = 0.0
             constraints.append(LinearConstraint(row, rhs, rhs))
+
+        if soc_terminal_min_mwh is not None:
+            row = np.zeros(self.n_vars)
+            row[self.isoc(T - 1)] = 1.0
+            constraints.append(LinearConstraint(row, soc_terminal_min_mwh, np.inf))
 
         # ---------- assemble bounds ----------
         lb = np.zeros(self.n_vars)
@@ -410,7 +431,15 @@ class StochasticUnitCommitmentModel:
     def iunserved(self, t, w): return self.off_unserved + t * self.W + w
 
     def build_and_solve(self, u_prev: np.ndarray | None = None,
-                         unserved_penalty: float = 5000.0) -> StochasticUCResult:
+                         unserved_penalty: float = 5000.0,
+                         soc_init_mwh: float | None = None,
+                         soc_terminal_min_mwh: float | None = None) -> StochasticUCResult:
+        """soc_init_mwh, soc_terminal_min_mwh: see UnitCommitmentModel.build_and_solve --
+        same meaning, same rolling-horizon use case. soc_terminal_min_mwh is applied to
+        EVERY scenario's ending soc (not just the expected one), since whichever scenario
+        actually happens, the operator still needs a reasonable starting point for the
+        next day -- this is what stops the stochastic model from draining the battery by
+        hour 23 in every scenario the same way the single-scenario model would without it."""
         T, G, W, fleet = self.T, self.G, self.W, self.fleet
         if u_prev is None:
             u_prev = np.zeros(G)
@@ -522,7 +551,7 @@ class StochasticUnitCommitmentModel:
         # ---------- battery dynamics, per scenario (same known starting SoC for all) ----------
         cap = self.battery["capacity_mwh"]
         eff = self.battery["efficiency"]
-        soc0 = self.battery["soc_init_frac"] * cap
+        soc0 = soc_init_mwh if soc_init_mwh is not None else self.battery["soc_init_frac"] * cap
         for w in range(W):
             for t in range(T):
                 row = np.zeros(self.n_vars)
@@ -535,6 +564,11 @@ class StochasticUnitCommitmentModel:
                     row[self.isoc(t - 1, w)] = -1.0
                     rhs = 0.0
                 constraints.append(LinearConstraint(row, rhs, rhs))
+
+            if soc_terminal_min_mwh is not None:
+                row = np.zeros(self.n_vars)
+                row[self.isoc(T - 1, w)] = 1.0
+                constraints.append(LinearConstraint(row, soc_terminal_min_mwh, np.inf))
 
         # ---------- bounds ----------
         lb = np.zeros(self.n_vars)
@@ -646,4 +680,3 @@ if __name__ == "__main__":
     print("Total curtailment (MWh):", result.curtailment.sum())
     print("\nBattery:")
     print(result.battery.to_string(index=False))
-    

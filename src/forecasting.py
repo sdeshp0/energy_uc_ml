@@ -154,6 +154,39 @@ def fit_forecast_and_history(history: pd.DataFrame, target_col: str, next_day_ca
     return mw_forecast, hist_pred
 
 
+def fit_and_predict_range(full_df: pd.DataFrame, target_col: str, n_train_rows: int,
+                           clip_range: tuple[float | None, float | None] = (0.0, 1.0)) -> pd.DataFrame:
+    """Fit ONCE on the first n_train_rows of full_df, then predict quantiles for
+    every row in full_df from that single fit -- including rows well beyond the
+    training window. For rolling-horizon simulation: refitting the model fresh
+    for each of many simulated days would be far too slow (each fit is a few
+    seconds x 3 quantiles x 3 targets), and isn't necessary -- a model fit once
+    can predict on any future feature row just as well as tomorrow's.
+
+    Lag features are computed on the full continuous series, so predictions for
+    simulation days correctly reference real actual values up to that point (this
+    is what makes it a fair simulation and not a lookahead: the model itself was
+    only ever trained on the initial window, it just gets to see real lag values
+    as the simulation walks forward, exactly as a deployed model would).
+
+    Returns a DataFrame aligned to full_df's index (rows before the lag warm-up
+    dropped) with p10/p50/p90 and 'actual' columns.
+    """
+    feat_full = _make_features(full_df[["hour", "dow", "day_of_year", target_col]], target_col)
+    y_full = full_df[target_col]
+
+    train_valid = feat_full.iloc[:n_train_rows].notna().all(axis=1)
+    feat_train = feat_full.iloc[:n_train_rows][train_valid]
+    y_train = y_full.iloc[:n_train_rows][train_valid].values
+    model = QuantileForecaster(target_col, clip_range=clip_range).fit(feat_train, y_train)
+
+    predict_valid = feat_full.notna().all(axis=1)
+    preds = model.predict(feat_full[predict_valid])
+    preds["actual"] = y_full[predict_valid].values
+    preds.index = full_df.index[predict_valid]
+    return preds
+
+
 def forecast_next_day(history: pd.DataFrame, target_col: str, next_day_calendar: pd.DataFrame,
                        capacity_mw: float = 1.0,
                        clip_range: tuple[float | None, float | None] = (0.0, 1.0)) -> pd.DataFrame:
@@ -193,3 +226,4 @@ if __name__ == "__main__":
     solar_mae = (result["solar_mw"] - result["solar_p50_mw"]).abs().mean()
     print(f"\nWind P50 MAE:  {wind_mae:.1f} MW (capacity 300 MW)")
     print(f"Solar P50 MAE: {solar_mae:.1f} MW (capacity 250 MW)")
+    
