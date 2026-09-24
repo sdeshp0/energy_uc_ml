@@ -2,9 +2,7 @@
 
 Day-ahead unit commitment for a diversified generation fleet (coal, CCGT, gas
 peaker, wind, solar, battery storage), where the renewable input comes from a
-machine-learned quantile forecaster rather than a naive assumption. The
-project's core finding is less "look, I made a forecast and an optimizer"
-and more a specific, defensible insight about how they interact:
+machine-learned quantile forecaster rather than a rated output.
 
 > **A forecast that minimizes average error is not the same as a forecast
 > that produces good commitment decisions.** For unit commitment, the cost
@@ -24,10 +22,6 @@ and more a specific, defensible insight about how they interact:
 > raw accuracy here — the win comes entirely from picking the quantile
 > whose *bias direction* matches what the optimization needs, not from the
 > forecast being "better."
-
-This is the standard cost-asymmetry argument for why decision-quality
-metrics (not just forecast accuracy) matter in operations research — and
-it's a good jumping-off point for the Phase 2 extensions below.
 
 ## Project structure
 
@@ -157,7 +151,7 @@ looks artificially cheap. Instead, each scenario's commitment schedule is
 `fixed_commitment` in `UnitCommitmentModel.build_and_solve`), which is what
 exposes the P50 forecast's real cost.
 
-## Limitations (honest, and worth stating if asked in an interview)
+## Limitations
 
 - The shutdown-indicator variable (`v` in `unit_commitment.py`) that
   enforces min-down-time is correctly constrained for MILP feasibility,
