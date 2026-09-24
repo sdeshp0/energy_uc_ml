@@ -16,7 +16,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from unit_commitment import UnitCommitmentModel
+from unit_commitment import UnitCommitmentModel, StochasticUnitCommitmentModel
 
 
 def fuel_adjusted_fleet(fleet: pd.DataFrame, coal_price: float, gas_price: float) -> pd.DataFrame:
@@ -351,5 +351,109 @@ def plot_battery_pnl(hours: np.ndarray, battery_econ: pd.DataFrame, price: np.nd
     ax2.set_xlabel("Hour")
     ax2.set_ylabel("Cumulative $")
     ax2.set_title("Battery cumulative P&L")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Stochastic-hedge sweeps
+# ---------------------------------------------------------------------------
+
+def illustrative_nine_scenarios(demand: np.ndarray, renewable: np.ndarray,
+                                 demand_spread: float = 0.05, renewable_spread: float = 0.30) -> list[dict]:
+    """A SIMPLIFIED stand-in for scenarios.py's empirically-estimated joint scenarios,
+    used here because the sensitivity page's "representative day" is picked by peak-
+    residual percentile from a freshly-generated dataset, not anchored to a specific
+    forecast/history window the way page 3's day is -- so there's no paired historical
+    forecast-error data available to estimate a real joint distribution for it without
+    fitting fresh quantile models (a ~18s cost the sensitivity page's sweeps are
+    designed to avoid).
+
+    Instead: a symmetric 3x3 grid of percentage perturbations around the day's actual
+    demand/renewable, weighted by the INDEPENDENCE assumption (25/50/25 marginal on
+    each side, combined by outer product) -- explicitly the simplification that
+    scenarios.py exists to avoid when real paired error data IS available. The spread
+    sizes aren't arbitrary: demand_spread=5% and renewable_spread=30% are round numbers
+    chosen to roughly match this project's actually-measured forecast error magnitudes
+    elsewhere (demand P50 MAE ~3-4% of typical demand; wind P50 MAE ~25-28% of
+    capacity) rather than being invented from nothing -- but they are NOT re-derived
+    from this specific day's own data. For the rigorous version (empirical joint
+    probabilities from real paired forecast errors), see scenarios.py and page 3.
+    """
+    demand_levels = {"low": demand * (1 - demand_spread), "mid": demand, "high": demand * (1 + demand_spread)}
+    renewable_levels = {
+        "low": np.clip(renewable * (1 - renewable_spread), 0, None), "mid": renewable,
+        "high": renewable * (1 + renewable_spread),
+    }
+    marginal_probs = {"low": 0.25, "mid": 0.5, "high": 0.25}
+
+    scenarios = []
+    for d_label, d_arr in demand_levels.items():
+        for r_label, r_arr in renewable_levels.items():
+            prob = marginal_probs[d_label] * marginal_probs[r_label]
+            scenarios.append({
+                "probability": prob, "demand": d_arr, "renewable": r_arr,
+                "demand_label": d_label, "renewable_label": r_label,
+            })
+    return scenarios
+
+
+def run_sweep_stochastic(base_fleet: pd.DataFrame, base_battery: dict, scenarios_template: list[dict],
+                          apply_fn, values: list, T: int = 24) -> pd.DataFrame:
+    """Like run_sweep, but solves StochasticUnitCommitmentModel (expected cost across a
+    FIXED 9-scenario set) at each swept value instead of UnitCommitmentModel against a
+    single demand/renewable pair. The scenarios' demand/renewable arrays don't depend on
+    fleet or battery, so scenarios_template is built once by the caller and reused
+    across every point in the sweep -- only the fleet/battery -- and therefore each
+    scenario's cost -- changes from point to point."""
+    rows = []
+    for v in values:
+        fleet, battery = apply_fn(base_fleet, base_battery, v)
+        model = StochasticUnitCommitmentModel(fleet, battery, scenarios_template, T=T)
+        res = model.build_and_solve()
+        row = {"value": v, "status": res.status}
+        if res.status == "optimal":
+            row["expected_cost"] = res.expected_cost
+            row["worst_case_cost"] = max(s.cost for s in res.scenarios)
+            row["worst_case_unserved_mw"] = max(s.unserved.max() for s in res.scenarios)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def sweep_fuel_price_stochastic(base_fleet: pd.DataFrame, base_battery: dict, scenarios_template: list[dict],
+                                 fuel: str, price_range: np.ndarray, other_fuel_price: float) -> pd.DataFrame:
+    def apply_fn(fleet, battery, v):
+        coal_p = v if fuel == "coal" else other_fuel_price
+        gas_p = v if fuel == "gas" else other_fuel_price
+        return fuel_adjusted_fleet(fleet, coal_p, gas_p), battery
+    return run_sweep_stochastic(base_fleet, base_battery, scenarios_template, apply_fn, list(price_range))
+
+
+def sweep_battery_param_stochastic(base_fleet: pd.DataFrame, base_battery: dict, scenarios_template: list[dict],
+                                    param: str, value_range: np.ndarray) -> pd.DataFrame:
+    def apply_fn(fleet, battery, v):
+        return fleet, {**battery, param: v}
+    return run_sweep_stochastic(base_fleet, base_battery, scenarios_template, apply_fn, list(value_range))
+
+
+def plot_sweep_cost_comparison(single_df: pd.DataFrame, stoch_df: pd.DataFrame, x_label: str, title: str,
+                                baseline_value: float | None = None):
+    """Single-scenario cost vs. stochastic hedge's expected AND worst-case cost, on
+    one chart -- makes the hedge's 'insurance premium' (and how it changes with the
+    swept parameter) directly visible rather than needing to compare two separate charts."""
+    single_ok = single_df[single_df["status"] == "optimal"]
+    stoch_ok = stoch_df[stoch_df["status"] == "optimal"]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(single_ok["value"], single_ok["total_cost"], "o-", color="#2b6cb0", label="Single-scenario cost")
+    ax.plot(stoch_ok["value"], stoch_ok["expected_cost"], "s-", color="#d69e2e", label="Stochastic hedge: expected cost")
+    ax.plot(stoch_ok["value"], stoch_ok["worst_case_cost"], "^--", color="#e53e3e", alpha=0.7,
+            label="Stochastic hedge: worst-case scenario cost")
+    if baseline_value is not None:
+        ax.axvline(baseline_value, color="gray", linestyle=":", linewidth=1, label="Current slider value")
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Cost ($)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
     fig.tight_layout()
     return fig
