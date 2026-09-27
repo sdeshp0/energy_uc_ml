@@ -365,7 +365,7 @@ def illustrative_nine_scenarios(demand: np.ndarray, renewable: np.ndarray,
     """A SIMPLIFIED stand-in for scenarios.py's empirically-estimated joint scenarios,
     used here because the sensitivity page's "representative day" is picked by peak-
     residual percentile from a freshly-generated dataset, not anchored to a specific
-    forecast/history window the way page 3's day is -- so there's no paired historical
+    forecast/history window the way page 2's day is -- so there's no paired historical
     forecast-error data available to estimate a real joint distribution for it without
     fitting fresh quantile models (a ~18s cost the sensitivity page's sweeps are
     designed to avoid).
@@ -379,7 +379,7 @@ def illustrative_nine_scenarios(demand: np.ndarray, renewable: np.ndarray,
     elsewhere (demand P50 MAE ~3-4% of typical demand; wind P50 MAE ~25-28% of
     capacity) rather than being invented from nothing -- but they are NOT re-derived
     from this specific day's own data. For the rigorous version (empirical joint
-    probabilities from real paired forecast errors), see scenarios.py and page 3.
+    probabilities from real paired forecast errors), see scenarios.py and page 2.
     """
     demand_levels = {"low": demand * (1 - demand_spread), "mid": demand, "high": demand * (1 + demand_spread)}
     renewable_levels = {

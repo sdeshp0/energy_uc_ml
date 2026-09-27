@@ -1,8 +1,8 @@
 """
 Shared Streamlit cache for the demand/wind/solar quantile forecast fit --
 the single most expensive step in this app (~7s combined after the
-n_estimators tuning in forecasting.py), and one that app.py, page 3, and
-page 2's fallback path all separately needed.
+n_estimators tuning in forecasting.py), and one that app.py, page 2, and
+page 1's fallback path all separately needed.
 
 Without a shared cache entry, each page independently re-fits the same
 three models for the same n_days_history, multiplying that cost by the

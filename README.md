@@ -43,10 +43,10 @@ energy-uc-ml/
 │   ├── pipeline.py           CLI: forecast-quality comparison (P10 vs P50 vs persistence)
 │   ├── app.py                main Streamlit dashboard
 │   └── pages/
-│       ├── 1_Sensitivity_Analysis.py           parameter sweeps, optional stochastic overlay
-│       ├── 2_Market_And_Battery_Arbitrage.py   simulated prices, settlement, battery arbitrage
-│       ├── 3_Stochastic_Unit_Commitment.py     the two-stage stochastic hedge
-│       └── 4_Rolling_Horizon_Simulation.py     multi-day comparison of both approaches
+│       ├── 1_Market_And_Battery_Arbitrage.py   simulated prices, settlement, battery arbitrage
+│       ├── 2_Stochastic_Unit_Commitment.py     the two-stage stochastic hedge
+│       ├── 3_Rolling_Horizon_Simulation.py     multi-day comparison of both approaches
+│       └── 4_Sensitivity_Analysis.py           parameter sweeps, optional stochastic overlay
 ├── docs/
 │   └── CODE_WALKTHROUGH.md   full technical walkthrough of the codebase
 ├── pyproject.toml            uv / pip project metadata and dependencies
@@ -118,7 +118,7 @@ No external MILP solver install is required. `unit_commitment.py` uses
    walk-forward comparison of committing on the P50 forecast alone versus
    the stochastic hedge, with battery state of charge and generator status
    carried forward across day boundaries.
-8. **Sensitivity analysis** (`analysis.py`, page 1). Parameter sweeps over
+8. **Sensitivity analysis** (`analysis.py`, page 4). Parameter sweeps over
    fuel prices and battery sizing, with an optional stochastic-hedge
    overlay.
 
@@ -173,15 +173,15 @@ address this:
   *improving* out-of-sample MAE on every target tested. This is not a
   speed/accuracy tradeoff.
 - **Shared caching across pages** (`cached_forecasts.py`). `app.py`, page
-  2's fallback, and page 3 previously each fit their own copy of the same
+  1's fallback, and page 2 previously each fit their own copy of the same
   models independently. A single `@st.cache_data`-decorated function,
   imported by all three, means the first page visited in a session pays
   the fit cost once; subsequent pages reuse the cached result for the same
   training-window setting.
 
-Page 1 (no forecasting; MILP solves only) and page 4 (fits once across a
+Page 4 (no forecasting; MILP solves only) and page 3 (fits once across a
 larger multi-day window, not shareable with the single-next-day cache)
-were not restructured, but page 4 benefits automatically from the
+were not restructured, but page 3 benefits automatically from the
 `n_estimators` change — its default 14-day window dropped from ~47s to
 ~32s.
 
@@ -210,8 +210,8 @@ were not restructured, but page 4 benefits automatically from the
   correlation fix in `scenarios.py`.
 - No transmission constraints, no reserve-margin requirements, single bus.
 - The sensitivity page's stochastic overlay uses a simplified,
-  independence-weighted scenario set (page 1) rather than the empirically
-  estimated probabilities used elsewhere (`scenarios.py`, pages 3–4),
+  independence-weighted scenario set (page 4) rather than the empirically
+  estimated probabilities used elsewhere (`scenarios.py`, pages 2–3),
   since its representative day is not anchored to a specific forecast
   window.
 

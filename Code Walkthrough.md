@@ -21,10 +21,10 @@ src/
 ├── pipeline.py              CLI: forecast-quality comparison (P10 vs P50 vs persistence)
 ├── app.py                   main Streamlit dashboard
 └── pages/
-    ├── 1_Sensitivity_Analysis.py            parameter sweeps, optional stochastic overlay
-    ├── 2_Market_And_Battery_Arbitrage.py    simulated prices, settlement, battery arbitrage
-    ├── 3_Stochastic_Unit_Commitment.py      the two-stage stochastic hedge
-    └── 4_Rolling_Horizon_Simulation.py      multi-day comparison of both approaches
+    ├── 1_Market_And_Battery_Arbitrage.py    simulated prices, settlement, battery arbitrage
+    ├── 2_Stochastic_Unit_Commitment.py      the two-stage stochastic hedge
+    ├── 3_Rolling_Horizon_Simulation.py      multi-day comparison of both approaches
+    └── 4_Sensitivity_Analysis.py            parameter sweeps, optional stochastic overlay
 ```
 
 Modules that don't need Streamlit don't import it (`data_gen`,
@@ -350,7 +350,7 @@ fit rather than the per-day solves.
 
 ---
 
-## 9. Market economics layer (`analysis.py` + page 2)
+## 9. Market economics layer (`analysis.py` + page 1)
 
 Kept separate from the cost-minimization objective except for the
 optional battery arbitrage term.
@@ -362,7 +362,7 @@ optional battery arbitrage term.
   economics, useful as a sanity check on the price series.
 - **`battery_economics(battery, price)`**: per-hour charge cost,
   discharge revenue, net and cumulative P&L.
-- **Battery arbitrage**: page 2 solves the same demand/renewable/fleet/
+- **Battery arbitrage**: page 1 solves the same demand/renewable/fleet/
   battery twice, with and without the price term, and reports true
   production cost (recomputed from dispatch, not the solver's raw
   `total_cost`) alongside battery P&L. Measured on one representative
@@ -371,7 +371,7 @@ optional battery arbitrage term.
 
 ---
 
-## 10. Sensitivity analysis (`analysis.py` + page 1)
+## 10. Sensitivity analysis (`analysis.py` + page 4)
 
 `run_sweep` is a generic engine: `apply_fn(fleet, battery, v) → (fleet,
 battery)` is the only thing that varies between a fuel-price sweep and a
@@ -385,7 +385,7 @@ independence-weighted — around the page's representative day, and
 `sweep_fuel_price_stochastic` / `sweep_battery_param_stochastic` sweep
 the two-stage MILP's expected and worst-case cost alongside the
 single-scenario cost. This deliberately does not reuse §6's empirically
-estimated probabilities: page 1's representative day is chosen by
+estimated probabilities: page 4's representative day is chosen by
 peak-residual percentile from a freshly generated dataset, not anchored
 to a specific forecast/history window, so there is no paired historical
 error data available without fitting fresh models (an added ~18s the
@@ -426,21 +426,21 @@ Streamlit dependency:
   (`cached_forecasts.get_day_and_forecasts`, §14) rather than fitting
   locally, and rendering the forecast chart, residual load, fleet table,
   commitment Gantt, dispatch stack, ramp detail, and battery SoC.
-- **Page 1 (Sensitivity Analysis)**: reads the main page's slider values
-  as sweep baselines, falling back to defaults if unvisited this session;
-  runs four sweeps, optionally with the stochastic overlay (§10). Does
-  not fit any forecast model, so is unaffected by §14.
-- **Page 2 (Market & Battery Arbitrage)**: settlement reporting on the
+- **Page 1 (Market & Battery Arbitrage)**: settlement reporting on the
   realized dispatch, and an independent arbitrage-on/off comparison (§9).
   Its fallback scenario (when the main page hasn't been visited) also
   goes through the shared cache.
-- **Page 3 (Stochastic Unit Commitment)**: builds the nine scenarios (§6),
+- **Page 2 (Stochastic Unit Commitment)**: builds the nine scenarios (§6),
   solves the two-stage MILP (§7), and compares against P50-only. Uses the
   shared cache directly rather than its own local fit.
-- **Page 4 (Rolling Horizon Simulation)**: the multi-day walk-forward
+- **Page 3 (Rolling Horizon Simulation)**: the multi-day walk-forward
   comparison (§8). Fits its own models across a larger window (training +
   simulation days), which the single-next-day shared cache doesn't cover,
   so it keeps its own `@st.cache_data` entry point.
+- **Page 4 (Sensitivity Analysis)**: reads the main page's slider values
+  as sweep baselines, falling back to defaults if unvisited this session;
+  runs four sweeps, optionally with the stochastic overlay (§10). Does
+  not fit any forecast model, so is unaffected by §14.
 
 All pages fall back to `scenario.DEFAULTS` when `st.session_state` lacks
 a prior scenario, so each also works as a standalone entry point.
@@ -495,7 +495,7 @@ solar accuracy for speed — see the fuller table in the commit history).
 Net effect: fitting all three targets dropped from ~20s to ~7s.
 
 **Shared caching across pages** (`cached_forecasts.py`). Before this
-change, `app.py`, page 2's fallback path, and page 3 each independently
+change, `app.py`, page 1's fallback path, and page 2 each independently
 fit their own copies of the same three models for the same
 `n_days_history` — Streamlit's `@st.cache_data` is keyed per decorated
 function object, so three separately-defined local wrapper functions
@@ -508,9 +508,9 @@ using the same `n_days_history` hits the cache instead of refitting.
 argument so it stays Streamlit-free itself — the caller is responsible
 for going through the shared cache.
 
-Page 1 does no forecasting (its sweeps operate on actual historical data
+Page 4 does no forecasting (its sweeps operate on actual historical data
 via `representative_day`, not a forecast) and is unaffected by either
-change. Page 4 fits its own models across a training-plus-simulation
+change. Page 3 fits its own models across a training-plus-simulation
 window that the single-next-day shared cache doesn't cover, so it keeps
 its own cache entry point, but benefits automatically from the
 `n_estimators` change: its default 14-day window dropped from ~47s to
