@@ -18,17 +18,16 @@ Two distinct things, kept separate on purpose:
 """
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 
-from data_gen import thermal_fleet_spec, battery_spec, simulate_price_series
-from unit_commitment import UnitCommitmentModel
-from analysis import (
+from src.data_gen import thermal_fleet_spec, battery_spec, simulate_price_series
+from src.unit_commitment import UnitCommitmentModel
+from src.analysis import (
     fuel_adjusted_fleet, residual_load, generator_economics, battery_economics,
-    plot_price_and_residual, plot_battery_pnl, plot_battery_soc,
+    plot_price_and_residual, plot_battery_pnl, plot_battery_soc, plot_line_comparison,
 )
-import scenario
-import cached_forecasts
+import src.scenario as scenario
+import src.cached_forecasts as cached_forecasts
 
 st.set_page_config(page_title="Market Prices & Battery Arbitrage", layout="wide")
 st.title("Market Prices & Battery Arbitrage")
@@ -91,6 +90,11 @@ else:
     resid = residual_load(demand, actual_renewable)
 
     st.pyplot(plot_price_and_residual(hours, price, resid))
+    st.caption(
+        "Simulated price (left axis) should broadly track residual load (right axis) -- "
+        "it's derived from the fleet's own merit order, so scarcity hours (high residual) "
+        "should coincide with price spikes."
+    )
 
     st.markdown(
         "**Per-generator economics.** The marginal (most expensive committed) unit "
@@ -110,6 +114,11 @@ else:
     col1.metric("Battery net P&L (settled day)", f"${bat_econ['net_pnl'].sum():,.0f}")
     col2.metric("System production cost (realized)", f"${r['realized_cost']:,.0f}")
     st.pyplot(plot_battery_pnl(hours, bat_econ, price))
+    st.caption(
+        "Top panel: hourly discharge revenue (green) and charge cost (red) against the "
+        "price line. Bottom panel: running cumulative P&L for the day -- a rising line "
+        "means the battery is net profitable at this point in the day."
+    )
 
 st.divider()
 
@@ -166,15 +175,19 @@ else:
                 delta=f"baseline: ${bat_econ_base['net_pnl'].sum():,.0f} -> arbitrage: ${bat_econ_arb['net_pnl'].sum():,.0f}")
 
     st.markdown("**Charge/discharge timing, baseline vs. arbitrage-aware:**")
-    compare_df = pd.DataFrame({
-        "hour": hours, "price": price,
-        "baseline_net_mw": res_base.battery["discharge_mw"].values - res_base.battery["charge_mw"].values,
-        "arbitrage_net_mw": res_arb.battery["discharge_mw"].values - res_arb.battery["charge_mw"].values,
-    }).set_index("hour")
-    st.line_chart(compare_df[["baseline_net_mw", "arbitrage_net_mw"]])
-    st.caption("Positive = net discharging, negative = net charging. Compare against the price sidebar chart above -- "
+    compare_series = {
+        "Baseline (blind to price)": res_base.battery["discharge_mw"].values - res_base.battery["charge_mw"].values,
+        "Arbitrage-aware": res_arb.battery["discharge_mw"].values - res_arb.battery["charge_mw"].values,
+    }
+    st.pyplot(plot_line_comparison(hours, compare_series, "Hour", "Net MW (+discharge / -charge)",
+                                    "Battery net power: baseline vs. arbitrage-aware"))
+    st.caption("Positive = net discharging, negative = net charging. Compare against the price chart above -- "
                "the arbitrage-aware line should hug 'charge when price is low, discharge when price is high' more closely.")
 
     st.markdown("**Battery state of charge, arbitrage-aware schedule:**")
     st.pyplot(plot_battery_soc(hours, res_arb.battery, battery_cfg["capacity_mwh"],
                                 battery_cfg["soc_min_frac"], battery_cfg["soc_max_frac"]))
+    st.caption(
+        "Same two-panel read as the main page's battery chart: state of charge should "
+        "stay within its bounds, driven by the charge/discharge bars below it."
+    )

@@ -18,12 +18,12 @@ estimated one.
 import numpy as np
 import streamlit as st
 
-from data_gen import generate_hourly_dataset, thermal_fleet_spec, battery_spec
-from analysis import (
+from src.data_gen import generate_hourly_dataset, thermal_fleet_spec, battery_spec
+from src.analysis import (
     representative_day, sweep_fuel_price, sweep_battery_param,
     plot_sweep_cost, plot_sweep_generation_mix,
     illustrative_nine_scenarios, sweep_fuel_price_stochastic, sweep_battery_param_stochastic,
-    plot_sweep_cost_comparison,
+    plot_sweep_cost_comparison, plot_line_comparison,
 )
 
 st.set_page_config(page_title="Sensitivity Analysis", layout="wide")
@@ -138,8 +138,11 @@ with col1:
     else:
         st.pyplot(plot_sweep_cost(coal_sweep, "Coal price ($/MMBtu)", "Cost vs. coal price",
                                    baseline_value=baseline("coal_price")))
+    st.caption("Total cost rises with coal price; the dotted line marks your current sidebar setting.")
     st.pyplot(plot_sweep_generation_mix(coal_sweep, gen_names, "Coal price ($/MMBtu)",
                                          "Generation mix vs. coal price (single-scenario dispatch)"))
+    st.caption("Coal's share of the stack shrinks as it gets pricier, with CCGT and the "
+               "peaker taking over -- this is the merit-order shift the cost chart alone doesn't show.")
 with col2:
     if stoch_sweeps is not None:
         st.pyplot(plot_sweep_cost_comparison(gas_sweep, stoch_sweeps["gas"], "Gas price ($/MMBtu)",
@@ -147,8 +150,11 @@ with col2:
     else:
         st.pyplot(plot_sweep_cost(gas_sweep, "Gas price ($/MMBtu)", "Cost vs. gas price",
                                    baseline_value=baseline("gas_price")))
+    st.caption("Total cost rises with gas price; the dotted line marks your current sidebar setting.")
     st.pyplot(plot_sweep_generation_mix(gas_sweep, gen_names, "Gas price ($/MMBtu)",
                                          "Generation mix vs. gas price (single-scenario dispatch)"))
+    st.caption("Gas-fired units' (CCGT, peaker) combined share shrinks as gas gets pricier, "
+               "with coal taking over the baseload role.")
 
 st.subheader("Battery parameters")
 col3, col4 = st.columns(2)
@@ -159,7 +165,10 @@ with col3:
     else:
         st.pyplot(plot_sweep_cost(power_sweep, "Battery power (MW)", "Cost vs. battery power rating",
                                    baseline_value=baseline("battery_power")))
-    st.line_chart(power_sweep.set_index("value")[["battery_throughput_mwh"]])
+    st.caption("Total cost drops as battery power rises, then flattens once the battery's "
+               "capacity (not power rating) becomes the binding constraint.")
+    st.pyplot(plot_line_comparison(power_sweep["value"], {"Throughput": power_sweep["battery_throughput_mwh"]},
+                                    "Battery power (MW)", "MWh/day", "Battery energy throughput vs. power rating"))
     st.caption("Battery energy throughput (charge + discharge, MWh/day) vs. power rating (single-scenario).")
 with col4:
     if stoch_sweeps is not None:
@@ -168,7 +177,10 @@ with col4:
     else:
         st.pyplot(plot_sweep_cost(capacity_sweep, "Battery capacity (MWh)", "Cost vs. battery capacity",
                                    baseline_value=baseline("battery_capacity")))
-    st.line_chart(capacity_sweep.set_index("value")[["battery_throughput_mwh"]])
+    st.caption("Total cost drops as battery capacity rises, with more gradual diminishing "
+               "returns than the power-rating chart -- energy capacity keeps adding value longer.")
+    st.pyplot(plot_line_comparison(capacity_sweep["value"], {"Throughput": capacity_sweep["battery_throughput_mwh"]},
+                                    "Battery capacity (MWh)", "MWh/day", "Battery energy throughput vs. capacity"))
     st.caption("Battery energy throughput (charge + discharge, MWh/day) vs. capacity (single-scenario).")
 
 st.markdown(

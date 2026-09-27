@@ -12,10 +12,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from data_gen import thermal_fleet_spec, battery_spec
-from analysis import fuel_adjusted_fleet
-import rolling_horizon
-import scenario as scenario_mod
+from src.data_gen import thermal_fleet_spec, battery_spec
+from src.analysis import fuel_adjusted_fleet, plot_line_comparison, plot_bar_comparison
+import src.rolling_horizon as rolling_horizon
+import src.scenario as scenario_mod
 
 st.set_page_config(page_title="Rolling Horizon Simulation", layout="wide")
 st.title("Rolling Horizon Simulation")
@@ -83,14 +83,25 @@ col3.metric("Cost difference", f"${summary['stochastic_total_cost'] - summary['p
             delta="negative = hedge is cheaper in aggregate", delta_color="off")
 
 st.subheader("Daily cost")
-cost_df = df.set_index("day_index")[["p50_only_cost", "stochastic_cost"]]
-cost_df.columns = ["P50-only", "Stochastic hedge"]
-st.line_chart(cost_df)
+cost_series = {
+    "P50-only": df["p50_only_cost"].values,
+    "Stochastic hedge": df["stochastic_cost"].values,
+}
+st.pyplot(plot_line_comparison(df["day_index"], cost_series, "Day", "Cost ($)",
+                                "Daily settled cost: P50-only vs. stochastic hedge"))
+st.caption(
+    "Spikes in the P50-only line typically coincide with days where actual conditions "
+    "diverged sharply from the median forecast -- watch whether the stochastic hedge "
+    "line stays flatter on the same days."
+)
 
 st.subheader("Daily unserved demand")
-unserved_df = df.set_index("day_index")[["p50_only_unserved_mw", "stochastic_unserved_mw"]]
-unserved_df.columns = ["P50-only", "Stochastic hedge"]
-st.bar_chart(unserved_df)
+unserved_series = {
+    "P50-only": df["p50_only_unserved_mw"].values,
+    "Stochastic hedge": df["stochastic_unserved_mw"].values,
+}
+st.pyplot(plot_bar_comparison(df["day_index"], unserved_series, "Day", "Unserved demand (MW)",
+                               "Daily peak unserved demand: P50-only vs. stochastic hedge"))
 st.caption(
     "If the stochastic hedge still shows unserved demand on the same day as P50-only, "
     "that day's actual conditions likely fell outside even the P90/P10 scenario coverage -- "
@@ -98,9 +109,12 @@ st.caption(
 )
 
 st.subheader("Battery state of charge, end of each day")
-soc_df = df.set_index("day_index")[["p50_only_soc_end_mwh", "stochastic_soc_end_mwh"]]
-soc_df.columns = ["P50-only", "Stochastic hedge"]
-st.line_chart(soc_df)
+soc_series = {
+    "P50-only": df["p50_only_soc_end_mwh"].values,
+    "Stochastic hedge": df["stochastic_soc_end_mwh"].values,
+}
+st.pyplot(plot_line_comparison(df["day_index"], soc_series, "Day", "State of charge (MWh)",
+                                "Battery SoC at end of day, across the simulation window"))
 st.caption(
     "This should stay roughly stable across days (returning to the target level each night) "
     "rather than drifting toward zero -- a finite-horizon solve has no reason to preserve "

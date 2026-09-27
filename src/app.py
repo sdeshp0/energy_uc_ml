@@ -12,13 +12,13 @@ rather than just reporting a final cost number.
 """
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 
 import cached_forecasts
 from analysis import (
     residual_load, thermal_and_battery_coverage,
     ramp_headroom, plot_commitment_gantt, plot_residual_load, plot_battery_soc,
+    plot_demand_vs_renewable_forecast, plot_dispatch_stack,
 )
 import scenario
 
@@ -71,11 +71,14 @@ col2.metric("Realized cost", f"${r['realized_cost']:,.0f}" if r["realized_cost"]
 col3.metric("Max unserved demand", f"{r['unserved_max']:.1f} MW" if r["unserved_max"] is not None else "N/A")
 
 st.subheader("Demand vs. renewable forecast")
-chart_df = pd.DataFrame({
-    "hour": hours, "demand_mw": r["demand"], "actual_renewable_mw": r["actual_renewable"],
-    "chosen_forecast_mw": r["chosen_renewable"],
-}).set_index("hour")
-st.line_chart(chart_df)
+fig_demand = plot_demand_vs_renewable_forecast(hours, r["demand"], r["actual_renewable"],
+                                                r["chosen_renewable"], quantile.upper())
+st.pyplot(fig_demand)
+st.caption(
+    f"The {quantile.upper()} forecast is what the commitment decision below is actually "
+    "based on -- compare it against the actual renewable line to see how much the "
+    "chosen quantile over- or under-estimates on this particular day."
+)
 
 st.subheader("Residual load: what thermal + battery must cover")
 st.markdown(
@@ -87,6 +90,11 @@ resid = residual_load(r["demand"], r["chosen_renewable"])
 coverage = thermal_and_battery_coverage(dispatch, r["planned"].battery)
 fig_resid = plot_residual_load(hours, resid, coverage["thermal_total_mw"].values, coverage["battery_net_mw"].values)
 st.pyplot(fig_resid)
+st.caption(
+    "The dashed line and the solid thermal line should track closely, with the gold "
+    "bars (battery net discharge/charge) making up the difference -- that's the battery "
+    "actively smoothing what thermal generation alone would otherwise have to chase."
+)
 
 st.subheader("Battery: state of charge")
 st.markdown(
@@ -99,6 +107,11 @@ battery_cfg = r["battery_spec"]
 fig_soc = plot_battery_soc(hours, r["planned"].battery, battery_cfg["capacity_mwh"],
                             battery_cfg["soc_min_frac"], battery_cfg["soc_max_frac"])
 st.pyplot(fig_soc)
+st.caption(
+    "Top panel: state of charge should stay between the dotted (min) and dashed (max) "
+    "bounds throughout. Bottom panel: green bars are discharge, red bars are charge -- "
+    "these are what produce the top panel's curve hour by hour."
+)
 
 st.subheader("Thermal fleet")
 st.markdown(
@@ -126,10 +139,21 @@ st.markdown(
 )
 fig_gantt = plot_commitment_gantt(dispatch, list(fleet["name"]))
 st.pyplot(fig_gantt)
+st.caption(
+    "Each row is one generator; a blue block means that generator is committed (on) "
+    "for that hour, green marks the specific hour it started up. Blocks that never "
+    "appear (e.g. an idle CCGT) simply weren't needed this day."
+)
 
 st.subheader("Dispatch stack")
-pivot = dispatch.pivot(index="hour", columns="generator", values="power_mw")
-st.bar_chart(pivot)
+fig_dispatch = plot_dispatch_stack(dispatch, r["demand"], list(fleet["name"]))
+st.pyplot(fig_dispatch)
+st.caption(
+    "Stacked bars are thermal output only, by generator; the dashed line is total "
+    "demand. The gap between the top of the stack and the demand line is covered by "
+    "renewables and the battery, which aren't thermal generators and so aren't stacked "
+    "here -- see the residual-load chart above for how those two fill that gap."
+)
 
 with st.expander("Ramp constraint detail (hours within 95% of a unit's ramp limit)"):
     rh = ramp_headroom(dispatch, fleet)

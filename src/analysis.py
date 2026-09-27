@@ -96,6 +96,7 @@ def plot_commitment_gantt(dispatch: pd.DataFrame, fleet_order: list[str], T: int
     ax.set_yticks(range(len(fleet_order)))
     ax.set_yticklabels(fleet_order)
     ax.set_xlabel("Hour")
+    ax.set_ylabel("Generator")
     ax.set_xlim(0, T)
     ax.set_title("Commitment schedule (blue = on, green = startup hour)")
     ax.invert_yaxis()
@@ -453,6 +454,79 @@ def plot_sweep_cost_comparison(single_df: pd.DataFrame, stoch_df: pd.DataFrame, 
         ax.axvline(baseline_value, color="gray", linestyle=":", linewidth=1, label="Current slider value")
     ax.set_xlabel(x_label)
     ax.set_ylabel("Cost ($)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# General-purpose charts (replace native st.line_chart/st.bar_chart, which
+# cannot carry a title or axis labels)
+# ---------------------------------------------------------------------------
+
+def plot_demand_vs_renewable_forecast(hours: np.ndarray, demand: np.ndarray, actual_renewable: np.ndarray,
+                                       chosen_forecast: np.ndarray, quantile_label: str = "forecast"):
+    """Demand, actual renewable output, and the forecast quantile driving the
+    commitment decision, on one chart."""
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.plot(hours, demand, "k--", linewidth=2, label="Demand")
+    ax.plot(hours, actual_renewable, color="#2b6cb0", linewidth=2, label="Actual renewable")
+    ax.plot(hours, chosen_forecast, color="#d69e2e", linewidth=2, label=f"Renewable forecast ({quantile_label})")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("MW")
+    ax.set_title("Demand vs. renewable output and forecast")
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def plot_dispatch_stack(dispatch: pd.DataFrame, demand: np.ndarray, fleet_order: list[str], T: int = 24):
+    """Stacked bar of each generator's dispatched output by hour, with demand
+    overlaid as a line -- shows both the total-supply-meets-demand balance and
+    the generator-by-generator composition in one chart."""
+    hours = np.arange(T)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    bottom = np.zeros(T)
+    for g in fleet_order:
+        power = dispatch[dispatch["generator"] == g].sort_values("hour")["power_mw"].values
+        if len(power) < T:
+            power = np.zeros(T)
+        ax.bar(hours, power, bottom=bottom, label=g, width=0.9)
+        bottom += power
+    ax.plot(hours, demand, "k--", linewidth=2, label="Demand")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("MW")
+    ax.set_title("Dispatch stack by generator")
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    fig.tight_layout()
+    return fig
+
+
+def plot_line_comparison(x, series: dict, x_label: str, y_label: str, title: str):
+    """Generic multi-line comparison chart -- one line per dict entry, x shared."""
+    fig, ax = plt.subplots(figsize=(9, 4))
+    for label, y in series.items():
+        ax.plot(x, y, marker="o", markersize=3, label=label)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def plot_bar_comparison(x, series: dict, x_label: str, y_label: str, title: str):
+    """Generic grouped-bar comparison chart -- one bar group per dict entry, x shared."""
+    fig, ax = plt.subplots(figsize=(9, 4))
+    n = len(series)
+    width = 0.8 / max(n, 1)
+    x_arr = np.asarray(x, dtype=float)
+    for i, (label, y) in enumerate(series.items()):
+        offset = (i - (n - 1) / 2) * width
+        ax.bar(x_arr + offset, y, width=width, label=label)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
     ax.set_title(title)
     ax.legend(fontsize=8)
     fig.tight_layout()
