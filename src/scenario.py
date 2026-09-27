@@ -25,8 +25,20 @@ def load_data(n_days_history):
     return history, next_day
 
 
-def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price):
-    history, next_day = load_data(n_days_history)
+def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price,
+                  prefetched=None):
+    """prefetched: optional dict from cached_forecasts.get_day_and_forecasts(), to reuse an
+    already-fit forecast instead of fitting one here. Passed in rather than fetched by this
+    function directly so scenario.py stays Streamlit-free -- the caller (app.py, or a page)
+    is responsible for going through the shared cache."""
+    if prefetched is not None:
+        history, next_day = prefetched["history"], prefetched["next_day"]
+        wind_fc, solar_fc = prefetched["wind_fc"], prefetched["solar_fc"]
+    else:
+        history, next_day = load_data(n_days_history)
+        wind_fc = forecast_next_day(history, "wind_cf", next_day, capacity_mw=300)
+        solar_fc = forecast_next_day(history, "solar_cf", next_day, capacity_mw=250)
+
     fleet = fuel_adjusted_fleet(thermal_fleet_spec(), coal_price, gas_price)
     battery = battery_spec()
     battery["power_mw"] = battery_power
@@ -34,9 +46,6 @@ def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal
 
     demand = next_day["demand_mw"].values
     actual_renewable = (next_day["wind_mw"] + next_day["solar_mw"]).values
-
-    wind_fc = forecast_next_day(history, "wind_cf", next_day, capacity_mw=300)
-    solar_fc = forecast_next_day(history, "solar_cf", next_day, capacity_mw=250)
     chosen_renewable = wind_fc[f"wind_{quantile}_mw"].values + solar_fc[f"solar_{quantile}_mw"].values
 
     model = UnitCommitmentModel(fleet, battery, T=24)

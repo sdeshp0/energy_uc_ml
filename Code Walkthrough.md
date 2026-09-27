@@ -14,6 +14,7 @@ src/
 ├── forecasting.py           quantile (P10/P50/P90) forecasters
 ├── unit_commitment.py       single-scenario MILP and two-stage stochastic MILP
 ├── scenario.py              shared single-day scenario builder for app.py and pages/
+├── cached_forecasts.py      shared Streamlit cache for the demand/wind/solar forecast fit
 ├── scenarios.py             empirical joint (demand x renewable) scenario probabilities
 ├── rolling_horizon.py       multi-day walk-forward simulation engine
 ├── analysis.py              residual load, sweeps, economics, all plotting
@@ -100,17 +101,21 @@ using `loss="quantile"`.
 **Features**: calendar (hour, day-of-week, sin/cos of hour and
 day-of-year) plus lags of the target at 24h, 48h, and 168h, and a rolling
 mean. Measured accuracy: solar P50 MAE ≈ 5 MW / 250 MW capacity; demand
-P50 MAE ≈ 21.7 MW; wind P50 MAE ≈ 84.5 MW / 300 MW capacity, worse than
+P50 MAE ≈ 21.6 MW; wind P50 MAE ≈ 79.5 MW / 300 MW capacity, worse than
 naive persistence (40.8 MW). The wind forecaster's bias is entirely
-one-directional — +84.5 MW, equal to its MAE — meaning it overestimates
+one-directional — +79.5 MW, equal to its MAE — meaning it overestimates
 in every hour of the test day. The P10 quantile pulls that back to a
-−42.0 MW average underestimate. This bias direction, not raw accuracy, is
+−59.2 MW average underestimate. This bias direction, not raw accuracy, is
 what the unit commitment result in §5 depends on.
 
 `QuantileForecaster.clip_range` bounds predictions: `(0.0, 1.0)` for a
 capacity factor, `(0.0, None)` for demand (non-negative, unbounded above).
 Quantiles are sorted per row after prediction to guarantee P10 ≤ P50 ≤
 P90, since each quantile is fit independently and can otherwise cross.
+
+`n_estimators=100` (previously 300) is a measured, not assumed, choice:
+at 300 estimators the model was overfitting on ~4,800 training rows, and
+100 was both faster and more accurate on every target tested (§14).
 
 ---
 
@@ -193,8 +198,8 @@ Comparing each forecast scenario's cost as computed under that forecast
 is misleading: an optimistic forecast lets the solver under-commit
 capacity and appears cheap. Fixing the commitment and re-solving against
 actual conditions (`fixed_commitment`) is what exposes the true cost.
-Measured: perfect foresight $358,274; P50 forecast realized $7,427,092;
-P10 (conservative) realized $359,608; naive persistence realized
+Measured: perfect foresight $358,274; P50 forecast realized $6,682,672;
+P10 (conservative) realized $359,999; naive persistence realized
 $503,223. P10's realized cost nearly matches perfect foresight despite
 P10 not being the most accurate forecast on offer (§3).
 
@@ -223,7 +228,10 @@ analysis.py: residual load / Gantt / ramp headroom / battery SoC
 `scenario.py`'s `run_pipeline()` implements this sequence once, so
 `app.py` and any page can build an identical scenario without importing
 `app.py` itself (which has top-level Streamlit calls that would
-re-execute its sidebar).
+re-execute its sidebar). `run_pipeline()` accepts an optional
+`prefetched` dict so the forecast-fitting step can be supplied by the
+shared cache (§14) instead of fitting locally, while `scenario.py` itself
+stays Streamlit-free.
 
 ---
 
@@ -247,8 +255,8 @@ uncertainty into a discrete scenario set.
    the two tercile labelings via `pd.crosstab`.
    **`independence_baseline_probabilities`** computes the alternative
    (outer product of the marginals) from the same data for comparison.
-   Measured: correlation −0.112; high-demand/low-renewable probability
-   0.123 empirically vs. 0.111 under independence.
+   Measured: correlation −0.13; high-demand/low-renewable probability
+   0.124 empirically vs. 0.111 under independence.
 4. **`build_nine_scenarios`**: maps `low/mid/high → P10/P50/P90` for both
    variables, pairing each of the nine combinations with its joint
    probability.
@@ -328,16 +336,17 @@ itself was chosen under the forecast).
 
 ### Measured effect, 14-day default window
 
-P50-only: 6 of 14 days with unserved demand, 457.4 MWh total unserved,
-$10,013,505 total cost. Stochastic hedge: 1 of 14 days with unserved
-demand, 0.8 MWh total unserved, $4,972,930 total cost — lower on both
+P50-only: 8 of 14 days with unserved demand, 458.7 MWh total unserved,
+$9,651,519 total cost. Stochastic hedge: 1 of 14 days with unserved
+demand, 0.8 MWh total unserved, $4,986,721 total cost — lower on both
 reliability and aggregate cost over this window, despite costing a
 premium on any single day analyzed in isolation (§7). The one day both
 approaches fail on is informative: a nine-scenario hedge reduces risk, it
 does not eliminate outcomes beyond its scenario coverage.
 
-Default window runtime is approximately 40–50 seconds, dominated by the
-one-time model fit rather than the per-day solves.
+Default window runtime is approximately 32 seconds (down from ~47s
+before the `n_estimators` tuning in §14), dominated by the one-time model
+fit rather than the per-day solves.
 
 ---
 
@@ -413,17 +422,25 @@ Streamlit dependency:
 
 - **`app.py`**: sidebar sliders (explicit `key=`s so other pages can read
   `st.session_state["coal_price"]` etc.) drive `scenario.run_pipeline()`,
-  rendering the forecast chart, residual load, fleet table, commitment
-  Gantt, dispatch stack, ramp detail, and battery SoC.
+  fetching the forecast fit through the shared cache
+  (`cached_forecasts.get_day_and_forecasts`, §14) rather than fitting
+  locally, and rendering the forecast chart, residual load, fleet table,
+  commitment Gantt, dispatch stack, ramp detail, and battery SoC.
 - **Page 1 (Sensitivity Analysis)**: reads the main page's slider values
   as sweep baselines, falling back to defaults if unvisited this session;
-  runs four sweeps, optionally with the stochastic overlay (§10).
+  runs four sweeps, optionally with the stochastic overlay (§10). Does
+  not fit any forecast model, so is unaffected by §14.
 - **Page 2 (Market & Battery Arbitrage)**: settlement reporting on the
   realized dispatch, and an independent arbitrage-on/off comparison (§9).
+  Its fallback scenario (when the main page hasn't been visited) also
+  goes through the shared cache.
 - **Page 3 (Stochastic Unit Commitment)**: builds the nine scenarios (§6),
-  solves the two-stage MILP (§7), and compares against P50-only.
+  solves the two-stage MILP (§7), and compares against P50-only. Uses the
+  shared cache directly rather than its own local fit.
 - **Page 4 (Rolling Horizon Simulation)**: the multi-day walk-forward
-  comparison (§8).
+  comparison (§8). Fits its own models across a larger window (training +
+  simulation days), which the single-next-day shared cache doesn't cover,
+  so it keeps its own `@st.cache_data` entry point.
 
 All pages fall back to `scenario.DEFAULTS` when `st.session_state` lacks
 a prior scenario, so each also works as a standalone entry point.
@@ -450,3 +467,59 @@ a prior scenario, so each also works as a standalone entry point.
    independence-weighted scenario set rather than §6's empirically
    estimated probabilities, since its representative day has no
    associated forecast/history window.
+
+---
+
+## 14. Performance
+
+The demand/wind/solar quantile forecast fit dominates runtime on every
+page that needs one — roughly 20s combined at the original settings,
+against MILP solves that run in well under a second each. Two changes
+address this.
+
+**`n_estimators` tuning** (`forecasting.py`). Each `GradientBoostingRegressor`
+used 300 estimators. Benchmarked against 150/100/75/50 on the project's
+actual training data (~4,800 rows), 300 was consistently worse than 100
+on both fit time and out-of-sample MAE, across all three targets:
+
+| n_estimators | fit time (single quantile) | wind P50 MAE | demand P50 MAE |
+|---|---|---|---|
+| 300 | 7.65s | 48.0 | 21.8 |
+| 150 | 3.78s | 47.3 | 21.7 |
+| 100 | 2.50s | 44.2 | 21.3 |
+| 75  | 1.88s | 45.1 | 20.7 |
+
+300 estimators was overfitting on this data size; 100 is a measured
+sweet spot rather than a speed/accuracy tradeoff (75 starts trading real
+solar accuracy for speed — see the fuller table in the commit history).
+Net effect: fitting all three targets dropped from ~20s to ~7s.
+
+**Shared caching across pages** (`cached_forecasts.py`). Before this
+change, `app.py`, page 2's fallback path, and page 3 each independently
+fit their own copies of the same three models for the same
+`n_days_history` — Streamlit's `@st.cache_data` is keyed per decorated
+function object, so three separately-defined local wrapper functions
+produce three separate cache entries even when the underlying computation
+is identical. `cached_forecasts.get_day_and_forecasts(n_days_history)` is
+now the single decorated function all three import and call; the first
+page visited in a session pays the fit cost, and every subsequent page
+using the same `n_days_history` hits the cache instead of refitting.
+`scenario.run_pipeline()` accepts the result as an optional `prefetched`
+argument so it stays Streamlit-free itself — the caller is responsible
+for going through the shared cache.
+
+Page 1 does no forecasting (its sweeps operate on actual historical data
+via `representative_day`, not a forecast) and is unaffected by either
+change. Page 4 fits its own models across a training-plus-simulation
+window that the single-next-day shared cache doesn't cover, so it keeps
+its own cache entry point, but benefits automatically from the
+`n_estimators` change: its default 14-day window dropped from ~47s to
+~32s.
+
+**Not implemented**: disk-based precomputation of the default scenario.
+The shared cache removes redundant fits within a running session but
+still pays full cost on a fresh process start. A disk cache would remove
+that too, at the cost of needing an invalidation strategy so it doesn't
+silently serve stale results after a code change — judged not worth the
+complexity given the shared in-session cache already addresses the more
+common case (navigating between pages during one sitting).

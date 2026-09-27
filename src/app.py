@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import cached_forecasts
 from analysis import (
     residual_load, thermal_and_battery_coverage,
     ramp_headroom, plot_commitment_gantt, plot_residual_load, plot_battery_soc,
@@ -45,13 +46,10 @@ with st.sidebar:
     st.caption("See **Sensitivity Analysis** in the page nav above for parameter sweeps.")
 
 
-@st.cache_data
-def load_data(n_days_history):
-    return scenario.load_data(n_days_history)
-
-
 def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price):
-    return scenario.run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price)
+    prefetched = cached_forecasts.get_day_and_forecasts(n_days_history)
+    return scenario.run_pipeline(quantile, n_days_history, battery_power, battery_capacity,
+                                  coal_price, gas_price, prefetched=prefetched)
 
 
 if run_btn or "result" not in st.session_state:

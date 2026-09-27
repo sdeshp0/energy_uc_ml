@@ -12,14 +12,14 @@ produces good commitment decisions. In unit commitment, the cost of
 *overestimating* available renewables (unserved demand) is far higher than
 the cost of underestimating it (extra thermal capacity committed). The
 median (P50) wind/solar forecast has a one-directional bias: it
-overestimates renewable output by 84.5 MW on average and never
+overestimates renewable output by 79.5 MW on average and never
 underestimates. That bias leaves the resulting commitment schedule short
-of thermal capacity, producing a realized cost of $7,427,092 once
+of thermal capacity, producing a realized cost of $6,682,672 once
 unserved-demand hours are priced in. The conservative P10 quantile
-(average underestimate of 42.0 MW) produces a realized cost of $359,608 —
+(average underestimate of 59.2 MW) produces a realized cost of $359,999 —
 close to the perfect-foresight lower bound of $358,274 — despite not being
 the most accurate forecast available: naive persistence (yesterday's
-actuals) has the lowest MAE of the three (40.8 MW vs. P10's 48.8 MW) and
+actuals) has the lowest MAE of the three (40.8 MW vs. P10's 60.1 MW) and
 lands at a comparable $503,223.
 
 The ML forecaster does not beat naive persistence on raw accuracy here.
@@ -36,6 +36,7 @@ energy-uc-ml/
 │   ├── forecasting.py        quantile (P10/P50/P90) forecasters; single-fit and range-fit variants
 │   ├── unit_commitment.py    single-scenario MILP and two-stage stochastic MILP
 │   ├── scenario.py           shared single-day scenario builder (used by app.py and pages/)
+│   ├── cached_forecasts.py   shared Streamlit cache for the demand/wind/solar forecast fit
 │   ├── scenarios.py          empirical joint (demand x renewable) scenario probabilities
 │   ├── rolling_horizon.py    multi-day walk-forward simulation engine
 │   ├── analysis.py           residual load, sweeps, economics, all plotting
@@ -135,11 +136,11 @@ premium — more thermal capacity committed than P50 alone would choose) in
 exchange for eliminating the worst-case failure mode.
 
 **Empirical vs. independence-assumed scenario probabilities.**
-Demand and renewable forecast errors have measured correlation −0.112 in
+Demand and renewable forecast errors have measured correlation −0.13 in
 this dataset (via a deliberate correlated "cold snap" shock in
 `data_gen.py`; without it the two are independent by construction and
 there is nothing for this comparison to find). The high-demand/
-low-renewable joint probability is 0.123 empirically vs. 0.111 assuming
+low-renewable joint probability is 0.124 empirically vs. 0.111 assuming
 independence — the independence assumption understates exactly the
 scenario a hedge is meant to protect against.
 
@@ -152,6 +153,37 @@ change in overall system behavior.
 147%. Battery power swept 0–150 MW shows diminishing returns past
 approximately 60–65 MW for a 200 MWh battery — a property of the
 power-to-energy ratio, not a tuning artifact.
+
+**Rolling horizon, 14-day default window.** P50-only: 8 of 14 days with
+unserved demand, 458.7 MWh total unserved, $9,651,519 total cost.
+Stochastic hedge: 1 of 14 days with unserved demand, 0.8 MWh total
+unserved, $4,986,721 total cost — lower on both reliability and aggregate
+cost over the window, despite costing a premium on any single day
+analyzed in isolation.
+
+## Performance
+
+The demand/wind/solar quantile forecast fit is the dominant cost on every
+page that needs one (roughly 20s at the original setting). Two changes
+address this:
+
+- **`n_estimators` tuning** (`forecasting.py`). The original 300
+  estimators per GBM were overfitting on ~4,800 training rows: reducing to
+  100 cut fit time roughly 3x (20s → 7s for all three targets) while
+  *improving* out-of-sample MAE on every target tested. This is not a
+  speed/accuracy tradeoff.
+- **Shared caching across pages** (`cached_forecasts.py`). `app.py`, page
+  2's fallback, and page 3 previously each fit their own copy of the same
+  models independently. A single `@st.cache_data`-decorated function,
+  imported by all three, means the first page visited in a session pays
+  the fit cost once; subsequent pages reuse the cached result for the same
+  training-window setting.
+
+Page 1 (no forecasting; MILP solves only) and page 4 (fits once across a
+larger multi-day window, not shareable with the single-next-day cache)
+were not restructured, but page 4 benefits automatically from the
+`n_estimators` change — its default 14-day window dropped from ~47s to
+~32s.
 
 ## Limitations
 
@@ -193,3 +225,10 @@ power-to-energy ratio, not a tuning artifact.
   used for joint scenario probabilities with true rolling retraining.
 - **Real data.** Swap the synthetic generator for NREL/EIA data (the
   swap-in path is documented in `data_gen.py`).
+- **Disk-based precomputation.** The shared cache (`cached_forecasts.py`)
+  eliminates redundant fits within a running session but still pays the
+  full cost on a fresh process start. Precomputing and serializing the
+  default scenario's forecast fit to disk would remove that cold-start
+  cost too; not implemented, since the underlying data generation's
+  determinism (fixed-seed RNG at module import) would need care to keep
+  a disk cache from silently going stale against code changes.

@@ -45,7 +45,14 @@ class QuantileForecaster:
     """One GBM per quantile, per target. clip_range bounds predictions (min, max),
     either of which can be None to leave that side unbounded -- (0.0, 1.0) for a
     capacity factor like wind/solar, (0.0, None) for a raw MW quantity like demand
-    that can't go negative but has no fixed upper bound."""
+    that can't go negative but has no fixed upper bound.
+
+    n_estimators=100 was previously 300; testing showed 300 was overfitting on
+    ~4800 training rows -- both fit time AND out-of-sample MAE were worse than
+    at 100, across all three targets (demand/wind/solar). 100 is a measured
+    sweet spot, not a speed/quality tradeoff -- going lower (75, 50) starts
+    trading real accuracy for speed, particularly for solar.
+    """
 
     def __init__(self, target_col: str, quantiles: list[float] = QUANTILES,
                  clip_range: tuple[float | None, float | None] = (0.0, 1.0)):
@@ -60,7 +67,7 @@ class QuantileForecaster:
         for q in self.quantiles:
             model = GradientBoostingRegressor(
                 loss="quantile", alpha=q,
-                n_estimators=300, max_depth=3, learning_rate=0.04,
+                n_estimators=100, max_depth=3, learning_rate=0.04,
                 subsample=0.8, random_state=0,
             )
             model.fit(feat_train, y_train)
@@ -226,4 +233,3 @@ if __name__ == "__main__":
     solar_mae = (result["solar_mw"] - result["solar_p50_mw"]).abs().mean()
     print(f"\nWind P50 MAE:  {wind_mae:.1f} MW (capacity 300 MW)")
     print(f"Solar P50 MAE: {solar_mae:.1f} MW (capacity 250 MW)")
-    

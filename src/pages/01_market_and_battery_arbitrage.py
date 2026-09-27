@@ -28,6 +28,7 @@ from analysis import (
     plot_price_and_residual, plot_battery_pnl, plot_battery_soc,
 )
 import scenario
+import cached_forecasts
 
 st.set_page_config(page_title="Market Prices & Battery Arbitrage", layout="wide")
 st.title("Market Prices & Battery Arbitrage")
@@ -45,10 +46,12 @@ def get_baseline_scenario():
     if "result" in st.session_state:
         return st.session_state["result"]
     with st.spinner("No scenario from the main page yet -- running one with default settings..."):
+        prefetched = cached_forecasts.get_day_and_forecasts(scenario.DEFAULTS["n_days_history"])
         return scenario.run_pipeline(
             scenario.DEFAULTS["quantile"], scenario.DEFAULTS["n_days_history"],
             scenario.DEFAULTS["battery_power"], scenario.DEFAULTS["battery_capacity"],
             scenario.DEFAULTS["coal_price"], scenario.DEFAULTS["gas_price"],
+            prefetched=prefetched,
         )
 
 

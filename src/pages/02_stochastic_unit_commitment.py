@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 from data_gen import thermal_fleet_spec, battery_spec
-from forecasting import fit_forecast_and_history
 from unit_commitment import UnitCommitmentModel, StochasticUnitCommitmentModel
 from analysis import fuel_adjusted_fleet
 from scenarios import (
@@ -28,6 +27,7 @@ from scenarios import (
     independence_baseline_probabilities, build_nine_scenarios, combine_renewable_forecast,
 )
 import scenario as scenario_mod
+import cached_forecasts
 
 st.set_page_config(page_title="Stochastic Unit Commitment", layout="wide")
 st.title("Stochastic Unit Commitment: the 9-path hedge")
@@ -60,24 +60,19 @@ with st.sidebar:
     run_btn = st.button("Build scenarios & solve", type="primary")
 
 
-@st.cache_data
 def load_and_forecast(n_days_history):
-    history, next_day = scenario_mod.load_data(n_days_history)
-    # Fit each target's quantile models exactly once, reused for both the
-    # next-day forecast and the in-sample historical error analysis --
-    # fitting demand/wind/solar separately for each purpose would double
-    # the (GBM x 3 quantiles x 3 targets) training cost for no benefit.
-    demand_fc, demand_hist = fit_forecast_and_history(history, "demand_mw", next_day,
-                                                        capacity_mw=1.0, clip_range=(0.0, None))
-    wind_fc, wind_hist = fit_forecast_and_history(history, "wind_cf", next_day, capacity_mw=300)
-    solar_fc, solar_hist = fit_forecast_and_history(history, "solar_cf", next_day, capacity_mw=250)
+    # Fitting goes through the SHARED cache (cached_forecasts.py) so this page
+    # reuses app.py's fit instead of repeating it -- previously this page fit
+    # its own copy of the same three models, doubling the cost of visiting
+    # both pages in one session for no benefit.
+    d = cached_forecasts.get_day_and_forecasts(n_days_history)
+    renewable_fc = combine_renewable_forecast(d["wind_fc"], d["solar_fc"])
+    paired = paired_errors_from_predictions(d["demand_hist"], d["wind_hist"], d["solar_hist"])
 
-    renewable_fc = combine_renewable_forecast(wind_fc, solar_fc)
-    paired = paired_errors_from_predictions(demand_hist, wind_hist, solar_hist)
-
+    next_day = d["next_day"]
     actual_demand = next_day["demand_mw"].values
     actual_renewable = (next_day["wind_mw"] + next_day["solar_mw"]).values
-    return demand_fc, renewable_fc, paired, actual_demand, actual_renewable
+    return d["demand_fc"], renewable_fc, paired, actual_demand, actual_renewable
 
 
 def plot_probability_grid(probs: pd.DataFrame, title: str):
