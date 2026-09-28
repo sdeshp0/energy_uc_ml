@@ -33,6 +33,17 @@ Modules that don't need Streamlit don't import it (`data_gen`,
 more than one page lives outside `app.py` rather than being duplicated or
 imported from a script with top-level UI side effects.
 
+**Import convention.** All project modules import each other by bare name
+(`from analysis import ...`), with `src/` as the import root. Mixing in
+`src.`-prefixed imports loads the same file twice under two names, which
+has three concrete effects: `cached_forecasts.get_day_and_forecasts`
+becomes two distinct functions with separate `st.cache_data` entries
+(defeating the shared cache, §14); module-level state such as
+`data_gen.RNG` is duplicated; and classes such as `UCResult` are defined
+twice. IDE import warnings are handled in the IDE, not the code: PyCharm
+via Sources Root on `src/`, Pylance/pyright via `[tool.pyright]
+extraPaths` in `pyproject.toml`.
+
 ---
 
 ## 2. Data generation (`data_gen.py`)

@@ -89,6 +89,20 @@ streamlit run src/app.py
 No external MILP solver install is required. `unit_commitment.py` uses
 `scipy.optimize.milp` (HiGHS backend), included with SciPy.
 
+**Imports and IDE setup.** Modules under `src/` import each other by bare
+name (`from data_gen import ...`); `src/` is the import root at runtime,
+since Streamlit puts the entrypoint's directory on `sys.path`. IDEs need
+to be told the same thing, or they flag these imports as unresolved:
+
+- **PyCharm:** right-click `src/` → Mark Directory as → Sources Root
+  (stored per machine in `.idea/`, so it is not part of the repo).
+- **VS Code (Pylance/pyright):** `pyproject.toml` sets
+  `[tool.pyright] extraPaths = ["src"]`.
+
+Do not work around IDE warnings by switching to `src.`-prefixed imports:
+the same file would load twice as two separate modules, splitting the
+shared Streamlit cache and duplicating module-level state.
+
 ## What's implemented
 
 1. **Single-scenario MILP** (`unit_commitment.py`). Binary commitment,
