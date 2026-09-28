@@ -18,8 +18,8 @@ estimated one.
 import numpy as np
 import streamlit as st
 
-from src.data_gen import generate_hourly_dataset, thermal_fleet_spec, battery_spec
-from src.analysis import (
+from data_gen import generate_hourly_dataset, thermal_fleet_spec, battery_spec
+from analysis import (
     representative_day, sweep_fuel_price, sweep_battery_param,
     plot_sweep_cost, plot_sweep_generation_mix,
     illustrative_nine_scenarios, sweep_fuel_price_stochastic, sweep_battery_param_stochastic,

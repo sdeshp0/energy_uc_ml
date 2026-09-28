@@ -20,14 +20,14 @@ Two distinct things, kept separate on purpose:
 import numpy as np
 import streamlit as st
 
-from src.data_gen import thermal_fleet_spec, battery_spec, simulate_price_series
-from src.unit_commitment import UnitCommitmentModel
-from src.analysis import (
+from data_gen import thermal_fleet_spec, battery_spec, simulate_price_series
+from unit_commitment import UnitCommitmentModel
+from analysis import (
     fuel_adjusted_fleet, residual_load, generator_economics, battery_economics,
     plot_price_and_residual, plot_battery_pnl, plot_battery_soc, plot_line_comparison,
 )
-import src.scenario as scenario
-import src.cached_forecasts as cached_forecasts
+import scenario
+import cached_forecasts
 
 st.set_page_config(page_title="Market Prices & Battery Arbitrage", layout="wide")
 st.title("Market Prices & Battery Arbitrage")

@@ -19,15 +19,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from src.data_gen import thermal_fleet_spec, battery_spec
-from src.unit_commitment import UnitCommitmentModel, StochasticUnitCommitmentModel
-from src.analysis import fuel_adjusted_fleet
-from src.scenarios import (
+from data_gen import thermal_fleet_spec, battery_spec
+from unit_commitment import UnitCommitmentModel, StochasticUnitCommitmentModel
+from analysis import fuel_adjusted_fleet
+from scenarios import (
     paired_errors_from_predictions, joint_scenario_probabilities,
     independence_baseline_probabilities, build_nine_scenarios, combine_renewable_forecast,
 )
-import src.scenario as scenario_mod
-import src.cached_forecasts as cached_forecasts
+import scenario as scenario_mod
+import cached_forecasts
 
 st.set_page_config(page_title="Stochastic Unit Commitment", layout="wide")
 st.title("Stochastic Unit Commitment: the 9-path hedge")

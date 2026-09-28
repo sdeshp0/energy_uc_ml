@@ -12,10 +12,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from src.data_gen import thermal_fleet_spec, battery_spec
-from src.analysis import fuel_adjusted_fleet, plot_line_comparison, plot_bar_comparison
-import src.rolling_horizon as rolling_horizon
-import src.scenario as scenario_mod
+from data_gen import thermal_fleet_spec, battery_spec
+from analysis import fuel_adjusted_fleet, plot_line_comparison, plot_bar_comparison
+import rolling_horizon
+import scenario as scenario_mod
 
 st.set_page_config(page_title="Rolling Horizon Simulation", layout="wide")
 st.title("Rolling Horizon Simulation")
