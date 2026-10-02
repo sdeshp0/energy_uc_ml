@@ -173,6 +173,56 @@ entries of a zero vector.
   discharge[t]/η`, bounded within `[soc_min_frac, soc_max_frac] ×
   capacity`. No mutual-exclusivity constraint between charging and
   discharging in the same hour.
+- **Reserve** (optional, §4a): total and spinning headroom requirements
+  against residual load, with shortfalls as penalized slack.
+
+### 4a. Reserve requirements
+
+Two optional margins, both disabled by default (`reserve_margin=0.0`,
+`spin_reserve_margin=0.0`), sized as a fraction of **residual load**
+(`demand − renewable`), not raw demand. This fleet's total thermal
+capacity (800 MW) is often below raw demand (peaks above 1,100 MW) by
+design — the system is meant to rely on renewables — so a margin sized
+against raw demand would be infeasible on ordinary days, consistent with
+the project's residual-load framing (§9's `residual_load` function is the
+same quantity).
+
+**Total reserve**: `Σ_g (pmax[g]·u[g,t] − p[g,t]) + reserve_short[t] ≥
+reserve_margin · residual[t]` — the sum of every committed unit's unused
+headroom must cover the margin, or the gap shows up as `reserve_short`.
+
+**Spinning reserve** is stricter: a unit's contribution isn't just its
+headroom but is additionally capped by how much it can ramp up within a
+response window (`spin_response_hours`, default 1/6 = 10 minutes, a
+standard convention). This needs a new per-generator variable
+`spin[g,t]`, bounded by two linear constraints —
+`spin[g,t] ≤ pmax[g]·u[g,t] − p[g,t]` (headroom) and
+`spin[g,t] ≤ ramp[g]·spin_response_hours` (deliverability) — since MILP
+constraints can't express `min(a, b)` directly. Then
+`Σ_g spin[g,t] + spin_short[t] ≥ spin_reserve_margin · residual[t]`.
+Verified directly: a slow-ramping unit (Coal_1, ramp 70 MW/hr) with ~210
+MW of idle headroom contributed almost nothing to spinning reserve, while
+a faster unit (CCGT_2, ramp 90 MW/hr) was capped exactly at
+`90 × 1/6 = 15 MW` — the ramp bound binding exactly as intended, not the
+much larger headroom bound.
+
+Both shortfalls are **penalized slack**, not hard constraints
+(`reserve_penalty`, default 1000 $/MW — below `unserved_penalty`'s 5000,
+since a reserve shortfall is a reliability-standard violation, not actual
+unserved demand). A hard constraint would have made the MILP infeasible
+on tight days rather than degrading gracefully; measuring the actual
+shortfall is also a more useful output than a solve failure. Measured: a
+15% total margin raised planned cost 1.8% with zero shortfall (the fleet
+could hold it); adding an 8% spinning margin on top raised cost further
+and produced a small (0.4 MW) spinning shortfall, confirming spinning
+reserve is the tighter of the two constraints.
+
+The stochastic model (§7) applies both margins **per scenario**, since
+each scenario has its own residual load and its own dispatch, but shares
+one commitment across all of them. Verified: in a 3-scenario hedge, a
+15%/8% requirement produced shortfall only in the worst (high-demand/
+low-renewable) scenario — the other two held full margin, since the
+shared commitment was already sized generously by the hedge itself.
 
 ### Optional arguments
 
@@ -197,11 +247,17 @@ entries of a zero vector.
   the objective once the horizon ends. Harmless for a single isolated day;
   fatal for a rolling multi-day simulation, where every day would start
   from the previous day's floor. §8 covers the effect of omitting this.
+- **`reserve_margin`, `spin_reserve_margin`, `spin_response_hours`,
+  `reserve_penalty`**: see §4a. Applied by `scenario.py` only to the
+  PLANNED (day-ahead) solve, not the perfect-foresight benchmark (no
+  uncertainty to hedge against) or the realized/settlement solve
+  (commitment is already fixed by then).
 
 ### Objective
 
 `Σ marginal_cost[g]·p[g,t] + Σ startup_cost[g]·s[g,t] + Σ
-unserved_penalty·unserved[t]`, plus the optional price term above.
+unserved_penalty·unserved[t] + Σ reserve_penalty·(reserve_short[t] +
+spin_short[t])`, plus the optional price term above.
 
 ### Result: planned vs. realized cost
 
@@ -284,8 +340,8 @@ blended into one implementable plan.
 
 | | Shared (1st stage) | Per-scenario (2nd stage / recourse) |
 |---|---|---|
-| Variables | `u[g,t]`, `s[g,t]`, `v[g,t]` | `p[g,t,w]`, `charge[t,w]`, `discharge[t,w]`, `soc[t,w]`, `curt[t,w]`, `unserved[t,w]` |
-| Rationale | Commitment must be decided before any scenario is known | Dispatch adjusts once the scenario resolves |
+| Variables | `u[g,t]`, `s[g,t]`, `v[g,t]` | `p[g,t,w]`, `charge[t,w]`, `discharge[t,w]`, `soc[t,w]`, `curt[t,w]`, `unserved[t,w]`, `spin[g,t,w]`, `reserve_short[t,w]`, `spin_short[t,w]` |
+| Rationale | Commitment must be decided before any scenario is known | Dispatch -- and therefore headroom, and therefore reserve adequacy -- adjusts once the scenario resolves |
 
 Index functions extend the single-scenario pattern with a scenario axis:
 `ip(g,t,w) = off_p + (g·T + t)·W + w`. Constraints mirror §4's, looped
@@ -436,7 +492,9 @@ Streamlit dependency:
   fetching the forecast fit through the shared cache
   (`cached_forecasts.get_day_and_forecasts`, §14) rather than fitting
   locally, and rendering the forecast chart, residual load, fleet table,
-  commitment Gantt, dispatch stack, ramp detail, and battery SoC.
+  commitment Gantt, dispatch stack, ramp detail, and battery SoC. Two
+  reserve sliders (total, spinning; both 0% by default) apply to the
+  planned solve (§4a); their metrics only render when either is nonzero.
 - **Page 1 (Market & Battery Arbitrage)**: settlement reporting on the
   realized dispatch, and an independent arbitrage-on/off comparison (§9).
   Its fallback scenario (when the main page hasn't been visited) also

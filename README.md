@@ -135,6 +135,15 @@ shared Streamlit cache and duplicating module-level state.
 8. **Sensitivity analysis** (`analysis.py`, page 4). Parameter sweeps over
    fuel prices and battery sizing, with an optional stochastic-hedge
    overlay.
+9. **Reserve requirements** (`unit_commitment.py`, both models). Optional
+   total and spinning reserve margins, sized against residual load (not
+   raw demand, since this fleet's thermal capacity is often below raw
+   demand by design). Spinning reserve additionally caps each unit's
+   contribution by its ramp rate within a 10-minute response window.
+   Shortfalls are a penalized slack, not a hard constraint, so a tight
+   requirement degrades gracefully instead of making the MILP infeasible.
+   Both default to 0% (disabled), so every existing result is unaffected
+   unless explicitly turned on via the app's sidebar.
 
 Full detail on each component, including the MILP formulations, is in
 `docs/CODE_WALKTHROUGH.md`.
@@ -174,6 +183,16 @@ Stochastic hedge: 1 of 14 days with unserved demand, 0.8 MWh total
 unserved, $4,986,721 total cost — lower on both reliability and aggregate
 cost over the window, despite costing a premium on any single day
 analyzed in isolation.
+
+**Reserve requirements.** On a representative day, adding a 15% total
+reserve margin raised planned cost by 1.8% and committed extra capacity
+in three additional hours, with zero shortfall (the requirement was
+satisfiable). Adding an 8% spinning margin on top raised cost further and
+produced a small (0.4 MW) spinning-reserve shortfall — spinning reserve
+is the tighter constraint, since it's capped by ramp rate, not just
+headroom. In a 3-scenario stochastic hedge, a 15%/8% requirement produced
+shortfall only in the worst (high-demand/low-renewable) scenario; the
+other two scenarios held the full margin with room to spare.
 
 ## Performance
 

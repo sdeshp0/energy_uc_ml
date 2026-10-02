@@ -15,6 +15,7 @@ DEFAULTS = {
     "quantile": "p50", "n_days_history": 200,
     "battery_power": 60, "battery_capacity": 200,
     "coal_price": 2.20, "gas_price": 4.50,
+    "reserve_margin": 0.0, "spin_reserve_margin": 0.0,
 }
 
 
@@ -26,11 +27,17 @@ def load_data(n_days_history):
 
 
 def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price,
-                  prefetched=None):
+                  prefetched=None, reserve_margin=0.0, spin_reserve_margin=0.0):
     """prefetched: optional dict from cached_forecasts.get_day_and_forecasts(), to reuse an
     already-fit forecast instead of fitting one here. Passed in rather than fetched by this
     function directly so scenario.py stays Streamlit-free -- the caller (app.py, or a page)
-    is responsible for going through the shared cache."""
+    is responsible for going through the shared cache.
+
+    reserve_margin, spin_reserve_margin: applied to the PLANNED (day-ahead) commitment
+    only -- reserve is a planning-stage hedge against forecast uncertainty, so it doesn't
+    apply to the perfect-foresight benchmark (no uncertainty to hedge against) or the
+    realized/settlement solve (commitment is already fixed by then; see
+    unit_commitment.py's docstring for the full reasoning)."""
     if prefetched is not None:
         history, next_day = prefetched["history"], prefetched["next_day"]
         wind_fc, solar_fc = prefetched["wind_fc"], prefetched["solar_fc"]
@@ -49,7 +56,8 @@ def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal
     chosen_renewable = wind_fc[f"wind_{quantile}_mw"].values + solar_fc[f"solar_{quantile}_mw"].values
 
     model = UnitCommitmentModel(fleet, battery, T=24)
-    planned = model.build_and_solve(demand, chosen_renewable)
+    planned = model.build_and_solve(demand, chosen_renewable,
+                                     reserve_margin=reserve_margin, spin_reserve_margin=spin_reserve_margin)
 
     perfect_model = UnitCommitmentModel(fleet, battery, T=24)
     perfect = perfect_model.build_and_solve(demand, actual_renewable)
@@ -69,4 +77,5 @@ def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal
         planned=planned, perfect=perfect, realized=realized,
         realized_cost=realized_cost, unserved_max=unserved_max,
         fleet=fleet, battery_spec=battery,
+        reserve_margin=reserve_margin, spin_reserve_margin=spin_reserve_margin,
     )

@@ -45,6 +45,8 @@ class UCResult:
     battery: pd.DataFrame           # per-hour charge/discharge/soc
     curtailment: np.ndarray         # per-hour curtailed renewable MW
     unserved: np.ndarray            # per-hour unserved demand MW (should be ~0 if feasible)
+    reserve_shortfall: np.ndarray = None   # per-hour total-reserve shortfall MW (0 if margin=0 or met)
+    spin_shortfall: np.ndarray = None      # per-hour spinning-reserve shortfall MW (0 if margin=0 or met)
 
 
 class UnitCommitmentModel:
@@ -64,6 +66,10 @@ class UnitCommitmentModel:
         #   soc[t]  : T     continuous (battery state of charge)
         #   curt[t] : T     continuous (curtailed renewables)
         #   unserved[t]: T  continuous (unserved demand -- big penalty, should be ~0)
+        #   spin[g,t]: G*T  continuous (this generator's contribution to spinning reserve,
+        #              bounded by both its headroom and its ramp-limited response capability)
+        #   reserve_short[t]: T  continuous (total reserve shortfall -- penalized slack)
+        #   spin_short[t]: T     continuous (spinning reserve shortfall -- penalized slack)
         self.n_u = self.G * T
         self.n_p = self.G * T
         self.n_s = self.G * T
@@ -73,6 +79,9 @@ class UnitCommitmentModel:
         self.n_soc = T
         self.n_curt = T
         self.n_unserved = T
+        self.n_spin = self.G * T
+        self.n_reserve_short = T
+        self.n_spin_short = T
 
         self.off_u = 0
         self.off_p = self.off_u + self.n_u
@@ -83,7 +92,10 @@ class UnitCommitmentModel:
         self.off_soc = self.off_d + self.n_d
         self.off_curt = self.off_soc + self.n_soc
         self.off_unserved = self.off_curt + self.n_curt
-        self.n_vars = self.off_unserved + self.n_unserved
+        self.off_spin = self.off_unserved + self.n_unserved
+        self.off_reserve_short = self.off_spin + self.n_spin
+        self.off_spin_short = self.off_reserve_short + self.n_reserve_short
+        self.n_vars = self.off_spin_short + self.n_spin_short
 
     # -- index helpers --
     def iu(self, g, t): return self.off_u + g * self.T + t
@@ -95,6 +107,9 @@ class UnitCommitmentModel:
     def isoc(self, t): return self.off_soc + t
     def icurt(self, t): return self.off_curt + t
     def iunserved(self, t): return self.off_unserved + t
+    def ispin(self, g, t): return self.off_spin + g * self.T + t
+    def ireserve_short(self, t): return self.off_reserve_short + t
+    def ispin_short(self, t): return self.off_spin_short + t
 
     def build_and_solve(self, demand: np.ndarray, renewable_mw: np.ndarray,
                          u_prev: np.ndarray | None = None,
@@ -102,7 +117,11 @@ class UnitCommitmentModel:
                          fixed_commitment: np.ndarray | None = None,
                          price: np.ndarray | None = None,
                          soc_init_mwh: float | None = None,
-                         soc_terminal_min_mwh: float | None = None) -> UCResult:
+                         soc_terminal_min_mwh: float | None = None,
+                         reserve_margin: float = 0.0,
+                         spin_reserve_margin: float = 0.0,
+                         spin_response_hours: float = 1 / 6,
+                         reserve_penalty: float = 1000.0) -> UCResult:
         """
         demand: length-T array of demand (MW)
         renewable_mw: length-T array of available wind+solar (MW), pre-summed
@@ -136,6 +155,27 @@ class UnitCommitmentModel:
             fair comparison, recompute true production cost from the dispatch (e.g. via
             analysis.generator_economics) rather than reading UCResult.total_cost when
             price is used.
+        reserve_margin: required total reserve as a fraction of RESIDUAL load
+            (demand - renewable), not raw demand. Residual load, not demand, is the
+            basis because this fleet is sized so thermal capacity alone (800 MW) is
+            often below raw demand (peaks above 1,100 MW) -- the system is meant to
+            rely on renewables, so a margin sized against raw demand would be
+            infeasible on ordinary days, not just extreme ones. Total reserve is the
+            sum of every committed unit's headroom (pmax*u - p): margin=0.0 (default)
+            disables the constraint entirely, reproducing prior behavior exactly.
+        spin_reserve_margin: required SPINNING reserve, same residual-load basis.
+            Spinning reserve is stricter than total reserve: a unit's contribution is
+            capped not just by its headroom but by how much it can actually ramp up
+            within spin_response_hours, since slow-ramping capacity that's technically
+            "unused" may not be deliverable in time to matter.
+        spin_response_hours: the response window spinning reserve must be deliverable
+            within, in hours (default 1/6 = 10 minutes, a standard convention).
+        reserve_penalty: cost per MW of reserve shortfall (total or spinning), added as
+            a penalized slack rather than a hard constraint -- so a tight reserve
+            requirement degrades gracefully (reported as a shortfall metric) instead of
+            making the MILP infeasible. Lower than unserved_penalty (5000 by default)
+            since failing to hold reserve is a reliability-standard violation, not the
+            same severity as demand actually going unserved.
         """
         T, G, fleet = self.T, self.G, self.fleet
         if u_prev is None:
@@ -149,6 +189,8 @@ class UnitCommitmentModel:
                 c_obj[self.is_(g, t)] = fleet.loc[g, "startup_cost"]
         for t in range(T):
             c_obj[self.iunserved(t)] = unserved_penalty
+            c_obj[self.ireserve_short(t)] = reserve_penalty
+            c_obj[self.ispin_short(t)] = reserve_penalty
         if price is not None:
             for t in range(T):
                 c_obj[self.ic(t)] += price[t]    # cost to charge (buying energy at market price)
@@ -271,6 +313,41 @@ class UnitCommitmentModel:
             row[self.isoc(T - 1)] = 1.0
             constraints.append(LinearConstraint(row, soc_terminal_min_mwh, np.inf))
 
+        # ---------- spinning reserve contribution: spin[g,t] <= headroom, spin[g,t] <= ramp-limited ----------
+        for g in range(G):
+            pmax = fleet.loc[g, "pmax_mw"]
+            ramp = fleet.loc[g, "ramp_mw_per_hr"]
+            for t in range(T):
+                row_headroom = np.zeros(self.n_vars)
+                row_headroom[self.ispin(g, t)] = 1.0
+                row_headroom[self.iu(g, t)] = -pmax
+                row_headroom[self.ip(g, t)] = 1.0
+                constraints.append(LinearConstraint(row_headroom, -np.inf, 0.0))
+
+                row_ramp = np.zeros(self.n_vars)
+                row_ramp[self.ispin(g, t)] = 1.0
+                constraints.append(LinearConstraint(row_ramp, -np.inf, ramp * spin_response_hours))
+
+        # ---------- reserve requirements, sized against residual load (demand - renewable) ----------
+        if reserve_margin > 0 or spin_reserve_margin > 0:
+            for t in range(T):
+                residual = max(demand[t] - renewable_mw[t], 0.0)
+
+                if reserve_margin > 0:
+                    row = np.zeros(self.n_vars)
+                    for g in range(G):
+                        row[self.iu(g, t)] = fleet.loc[g, "pmax_mw"]
+                        row[self.ip(g, t)] += -1.0
+                    row[self.ireserve_short(t)] = 1.0
+                    constraints.append(LinearConstraint(row, reserve_margin * residual, np.inf))
+
+                if spin_reserve_margin > 0:
+                    row = np.zeros(self.n_vars)
+                    for g in range(G):
+                        row[self.ispin(g, t)] = 1.0
+                    row[self.ispin_short(t)] = 1.0
+                    constraints.append(LinearConstraint(row, spin_reserve_margin * residual, np.inf))
+
         # ---------- assemble bounds ----------
         lb = np.zeros(self.n_vars)
         ub = np.full(self.n_vars, np.inf)
@@ -310,7 +387,7 @@ class UnitCommitmentModel:
     def _package_result(self, res, demand, renewable_mw) -> UCResult:
         if not res.success:
             return UCResult("infeasible_or_failed", np.nan, pd.DataFrame(), pd.DataFrame(),
-                             np.zeros(self.T), np.zeros(self.T))
+                             np.zeros(self.T), np.zeros(self.T), np.zeros(self.T), np.zeros(self.T))
 
         x = res.x
         rows = []
@@ -323,6 +400,7 @@ class UnitCommitmentModel:
                     "power_mw": x[self.ip(g, t)],
                     "startup": round(x[self.is_(g, t)]),
                     "shutdown": round(x[self.iv(g, t)]),
+                    "spin_reserve_mw": x[self.ispin(g, t)],
                 })
         dispatch = pd.DataFrame(rows)
 
@@ -335,8 +413,10 @@ class UnitCommitmentModel:
 
         curt = np.array([x[self.icurt(t)] for t in range(self.T)])
         unserved = np.array([x[self.iunserved(t)] for t in range(self.T)])
+        reserve_short = np.array([x[self.ireserve_short(t)] for t in range(self.T)])
+        spin_short = np.array([x[self.ispin_short(t)] for t in range(self.T)])
 
-        return UCResult("optimal", res.fun, dispatch, battery, curt, unserved)
+        return UCResult("optimal", res.fun, dispatch, battery, curt, unserved, reserve_short, spin_short)
 
 
 @dataclass
@@ -351,6 +431,8 @@ class ScenarioOutcome:
     battery: pd.DataFrame
     curtailment: np.ndarray
     unserved: np.ndarray
+    reserve_shortfall: np.ndarray = None
+    spin_shortfall: np.ndarray = None
 
 
 @dataclass
@@ -407,6 +489,11 @@ class StochasticUnitCommitmentModel:
         self.n_soc = T * W
         self.n_curt = T * W
         self.n_unserved = T * W
+        # Reserve variables are also per-scenario: headroom and residual load both
+        # depend on which scenario's demand/renewable and dispatch are in play.
+        self.n_spin = G * T * W
+        self.n_reserve_short = T * W
+        self.n_spin_short = T * W
 
         self.off_u = 0
         self.off_s = self.off_u + self.n_u
@@ -417,7 +504,10 @@ class StochasticUnitCommitmentModel:
         self.off_soc = self.off_d + self.n_d
         self.off_curt = self.off_soc + self.n_soc
         self.off_unserved = self.off_curt + self.n_curt
-        self.n_vars = self.off_unserved + self.n_unserved
+        self.off_spin = self.off_unserved + self.n_unserved
+        self.off_reserve_short = self.off_spin + self.n_spin
+        self.off_spin_short = self.off_reserve_short + self.n_reserve_short
+        self.n_vars = self.off_spin_short + self.n_spin_short
 
     # -- index helpers -- first-stage (g,t); second-stage (g,t,w) or (t,w)
     def iu(self, g, t): return self.off_u + g * self.T + t
@@ -429,17 +519,30 @@ class StochasticUnitCommitmentModel:
     def isoc(self, t, w): return self.off_soc + t * self.W + w
     def icurt(self, t, w): return self.off_curt + t * self.W + w
     def iunserved(self, t, w): return self.off_unserved + t * self.W + w
+    def ispin(self, g, t, w): return self.off_spin + (g * self.T + t) * self.W + w
+    def ireserve_short(self, t, w): return self.off_reserve_short + t * self.W + w
+    def ispin_short(self, t, w): return self.off_spin_short + t * self.W + w
 
     def build_and_solve(self, u_prev: np.ndarray | None = None,
                          unserved_penalty: float = 5000.0,
                          soc_init_mwh: float | None = None,
-                         soc_terminal_min_mwh: float | None = None) -> StochasticUCResult:
+                         soc_terminal_min_mwh: float | None = None,
+                         reserve_margin: float = 0.0,
+                         spin_reserve_margin: float = 0.0,
+                         spin_response_hours: float = 1 / 6,
+                         reserve_penalty: float = 1000.0) -> StochasticUCResult:
         """soc_init_mwh, soc_terminal_min_mwh: see UnitCommitmentModel.build_and_solve --
         same meaning, same rolling-horizon use case. soc_terminal_min_mwh is applied to
         EVERY scenario's ending soc (not just the expected one), since whichever scenario
         actually happens, the operator still needs a reasonable starting point for the
         next day -- this is what stops the stochastic model from draining the battery by
-        hour 23 in every scenario the same way the single-scenario model would without it."""
+        hour 23 in every scenario the same way the single-scenario model would without it.
+
+        reserve_margin, spin_reserve_margin, spin_response_hours, reserve_penalty: see
+        UnitCommitmentModel.build_and_solve for the formulation. Applied per scenario --
+        each scenario's own residual load and dispatch determine its own reserve
+        requirement and shortfall, since whichever scenario actually materializes is
+        the one whose reserve adequacy matters."""
         T, G, W, fleet = self.T, self.G, self.W, self.fleet
         if u_prev is None:
             u_prev = np.zeros(G)
@@ -456,6 +559,8 @@ class StochasticUnitCommitmentModel:
                     c_obj[self.ip(g, t, w)] = probs[w] * fleet.loc[g, "marginal_cost"]
             for t in range(T):
                 c_obj[self.iunserved(t, w)] = probs[w] * unserved_penalty
+                c_obj[self.ireserve_short(t, w)] = probs[w] * reserve_penalty
+                c_obj[self.ispin_short(t, w)] = probs[w] * reserve_penalty
 
         constraints = []
 
@@ -570,6 +675,44 @@ class StochasticUnitCommitmentModel:
                 row[self.isoc(T - 1, w)] = 1.0
                 constraints.append(LinearConstraint(row, soc_terminal_min_mwh, np.inf))
 
+        # ---------- spinning reserve contribution, per scenario ----------
+        for g in range(G):
+            pmax = fleet.loc[g, "pmax_mw"]
+            ramp = fleet.loc[g, "ramp_mw_per_hr"]
+            for w in range(W):
+                for t in range(T):
+                    row_headroom = np.zeros(self.n_vars)
+                    row_headroom[self.ispin(g, t, w)] = 1.0
+                    row_headroom[self.iu(g, t)] = -pmax
+                    row_headroom[self.ip(g, t, w)] = 1.0
+                    constraints.append(LinearConstraint(row_headroom, -np.inf, 0.0))
+
+                    row_ramp = np.zeros(self.n_vars)
+                    row_ramp[self.ispin(g, t, w)] = 1.0
+                    constraints.append(LinearConstraint(row_ramp, -np.inf, ramp * spin_response_hours))
+
+        # ---------- reserve requirements, per scenario, sized against that scenario's residual load ----------
+        if reserve_margin > 0 or spin_reserve_margin > 0:
+            for w in range(W):
+                demand_w, renewable_w = self.scenarios[w]["demand"], self.scenarios[w]["renewable"]
+                for t in range(T):
+                    residual = max(demand_w[t] - renewable_w[t], 0.0)
+
+                    if reserve_margin > 0:
+                        row = np.zeros(self.n_vars)
+                        for g in range(G):
+                            row[self.iu(g, t)] = fleet.loc[g, "pmax_mw"]
+                            row[self.ip(g, t, w)] += -1.0
+                        row[self.ireserve_short(t, w)] = 1.0
+                        constraints.append(LinearConstraint(row, reserve_margin * residual, np.inf))
+
+                    if spin_reserve_margin > 0:
+                        row = np.zeros(self.n_vars)
+                        for g in range(G):
+                            row[self.ispin(g, t, w)] = 1.0
+                        row[self.ispin_short(t, w)] = 1.0
+                        constraints.append(LinearConstraint(row, spin_reserve_margin * residual, np.inf))
+
         # ---------- bounds ----------
         lb = np.zeros(self.n_vars)
         ub = np.full(self.n_vars, np.inf)
@@ -598,9 +741,9 @@ class StochasticUnitCommitmentModel:
         res = milp(c_obj, constraints=constraints, integrality=integrality,
                    bounds=bounds, options={"time_limit": 120})
 
-        return self._package_result(res, probs, unserved_penalty)
+        return self._package_result(res, probs, unserved_penalty, reserve_penalty)
 
-    def _package_result(self, res, probs, unserved_penalty) -> StochasticUCResult:
+    def _package_result(self, res, probs, unserved_penalty, reserve_penalty) -> StochasticUCResult:
         if not res.success:
             return StochasticUCResult("infeasible_or_failed", np.nan, np.nan, pd.DataFrame(), [])
 
@@ -629,6 +772,7 @@ class StochasticUnitCommitmentModel:
                         "on": round(x[self.iu(g, t)]),
                         "power_mw": x[self.ip(g, t, w)],
                         "startup": round(x[self.is_(g, t)]),
+                        "spin_reserve_mw": x[self.ispin(g, t, w)],
                     })
             dispatch = pd.DataFrame(dispatch_rows)
             battery_df = pd.DataFrame({
@@ -639,10 +783,12 @@ class StochasticUnitCommitmentModel:
             })
             curt = np.array([x[self.icurt(t, w)] for t in range(T)])
             unserved = np.array([x[self.iunserved(t, w)] for t in range(T)])
+            reserve_short = np.array([x[self.ireserve_short(t, w)] for t in range(T)])
+            spin_short = np.array([x[self.ispin_short(t, w)] for t in range(T)])
 
             recourse_cost = sum(
                 x[self.ip(g, t, w)] * fleet.loc[g, "marginal_cost"] for g in range(G) for t in range(T)
-            ) + unserved.sum() * unserved_penalty
+            ) + unserved.sum() * unserved_penalty + (reserve_short.sum() + spin_short.sum()) * reserve_penalty
             scenario_cost = startup_cost_total + recourse_cost
 
             scenario_outcomes.append(ScenarioOutcome(
@@ -651,6 +797,7 @@ class StochasticUnitCommitmentModel:
                 renewable_label=self.scenarios[w].get("renewable_label", ""),
                 cost=scenario_cost, dispatch=dispatch, battery=battery_df,
                 curtailment=curt, unserved=unserved,
+                reserve_shortfall=reserve_short, spin_shortfall=spin_short,
             ))
 
         return StochasticUCResult(

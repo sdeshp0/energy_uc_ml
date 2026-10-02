@@ -42,20 +42,32 @@ with st.sidebar:
     gas_price = st.slider("Gas price ($/MMBtu)", 2.0, 12.0, 4.50, step=0.10, key="gas_price",
                            help="All three gas units (both CCGTs + the peaker) share this price.")
 
+    st.header("Reserve requirements")
+    reserve_margin_pct = st.slider("Total reserve margin (%)", 0, 30, 0, step=1, key="reserve_margin_pct",
+                                    help="Required committed headroom, as a percent of residual load "
+                                         "(demand - renewable), applied to the day-ahead commitment. "
+                                         "0 = disabled (today's default behavior).")
+    spin_reserve_pct = st.slider("Spinning reserve margin (%)", 0, 20, 0, step=1, key="spin_reserve_pct",
+                                  help="Like total reserve, but only counts headroom a unit can actually "
+                                       "deliver within 10 minutes (ramp-limited) -- stricter than total reserve.")
+
     run_btn = st.button("Run pipeline", type="primary")
     st.caption("See **Sensitivity Analysis** in the page nav above for parameter sweeps.")
 
 
-def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price):
+def run_pipeline(quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price,
+                  reserve_margin, spin_reserve_margin):
     prefetched = cached_forecasts.get_day_and_forecasts(n_days_history)
     return scenario.run_pipeline(quantile, n_days_history, battery_power, battery_capacity,
-                                  coal_price, gas_price, prefetched=prefetched)
+                                  coal_price, gas_price, prefetched=prefetched,
+                                  reserve_margin=reserve_margin, spin_reserve_margin=spin_reserve_margin)
 
 
 if run_btn or "result" not in st.session_state:
     with st.spinner("Training forecaster and solving MILP..."):
         st.session_state["result"] = run_pipeline(
-            quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price
+            quantile, n_days_history, battery_power, battery_capacity, coal_price, gas_price,
+            reserve_margin_pct / 100, spin_reserve_pct / 100,
         )
 
 r = st.session_state["result"]
@@ -69,6 +81,13 @@ col2.metric("Realized cost", f"${r['realized_cost']:,.0f}" if r["realized_cost"]
             delta=f"{r['realized_cost'] - r['perfect'].total_cost:,.0f} vs perfect foresight"
             if r["realized_cost"] else None, delta_color="inverse")
 col3.metric("Max unserved demand", f"{r['unserved_max']:.1f} MW" if r["unserved_max"] is not None else "N/A")
+
+if r["reserve_margin"] > 0 or r["spin_reserve_margin"] > 0:
+    col4, col5 = st.columns(2)
+    col4.metric("Max total reserve shortfall", f"{r['planned'].reserve_shortfall.max():.1f} MW",
+                help="Nonzero means the required margin couldn't be fully held some hour -- "
+                     "a soft-penalized shortfall, not an infeasible solve.")
+    col5.metric("Max spinning reserve shortfall", f"{r['planned'].spin_shortfall.max():.1f} MW")
 
 st.subheader("Demand vs. renewable forecast")
 fig_demand = plot_demand_vs_renewable_forecast(hours, r["demand"], r["actual_renewable"],
