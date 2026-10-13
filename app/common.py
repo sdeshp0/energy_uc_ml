@@ -17,7 +17,8 @@ except ImportError:  # running from a checkout without `pip install -e .`
 
 from ucsim.config import Scenario, list_presets
 from ucsim.simulate import (
-    STRATEGY_LABELS,  # noqa: F401  (re-exported for the pages)
+    STRATEGY_DESCRIPTIONS,
+    STRATEGY_LABELS,
     Prepared,
     SimResult,
     prepare,
@@ -101,6 +102,18 @@ def scenario_sidebar() -> Scenario:
         "data": {"seed": int(seed), "train_days": train},
         "fleet": fleet.dropna(subset=["name"]).to_dict("records"),
     })
+
+
+def strategy_guide(expanded: bool = False) -> None:
+    """Expander explaining every commitment strategy."""
+    with st.expander("What do the strategies mean?", expanded=expanded):
+        st.markdown(
+            "Each strategy decides which units to switch on using its own view of the "
+            "future. The simulator then replays what actually happened with those units, "
+            "so costs are always the real outcome, not the plan."
+        )
+        for key, label in STRATEGY_LABELS.items():
+            st.markdown(f"**{label}.** {STRATEGY_DESCRIPTIONS[key]}")
 
 
 def describe(sc: Scenario) -> str:

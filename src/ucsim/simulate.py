@@ -33,6 +33,39 @@ STRATEGY_LABELS = {
     "stochastic": "Stochastic",
 }
 
+# Plain-language explanations shown in the app. Every strategy is settled
+# against actual demand and renewables; only the planning input differs.
+STRATEGY_DESCRIPTIONS = {
+    "perfect": (
+        "Plans on what actually happens: the real demand and renewable output. "
+        "No operator can do this, so it is the benchmark. Its cost is the floor "
+        "every other strategy is measured against."
+    ),
+    "persistence": (
+        "Assumes the future repeats the most recent known day: tomorrow's demand "
+        "and renewables at each hour equal the same hour from the last day of data "
+        "available when the decision is made. A no-model baseline that misses "
+        "anything new, such as a cold snap."
+    ),
+    "p50": (
+        "Plans on the median (P50) forecast from the machine-learning models: the "
+        "single most likely value for demand and renewables each hour. Right on "
+        "average, but it doesn't prepare for anything worse than expected."
+    ),
+    "conservative": (
+        "Plans for a bad but plausible day: high demand (P90, only 10% chance of "
+        "being higher) together with low renewables (P10, only 10% chance of being "
+        "lower). Commits extra capacity as a safety margin, which costs more on "
+        "ordinary days but rarely leaves demand unserved."
+    ),
+    "stochastic": (
+        "Plans against several possible futures at once. It samples forecast-error "
+        "paths from history, adds them to the P50 forecast, and picks one commitment "
+        "schedule that minimizes expected cost across all of them. Hedges only as "
+        "much as the risk justifies; slower to solve."
+    ),
+}
+
 
 @dataclass
 class Prepared:

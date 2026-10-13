@@ -3,7 +3,7 @@
 import altair as alt
 import pandas as pd
 import streamlit as st
-from common import STRATEGY_LABELS, describe, run_cached, scenario_sidebar
+from common import STRATEGY_LABELS, describe, run_cached, scenario_sidebar, strategy_guide
 
 st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
@@ -22,6 +22,7 @@ SWEEPS = {
 }
 
 mode = st.radio("Compare", ["Strategies", "Parameter sweep"], horizontal=True)
+strategy_guide()
 if mode == "Strategies":
     chosen = st.multiselect("Strategies", list(STRATEGY_LABELS), default=sc.strategies,
                             format_func=STRATEGY_LABELS.get)
