@@ -1,0 +1,4 @@
+description: Three spring days at 15-minute resolution, re-committed every 6 hours over a 24-hour look-ahead.
+time: {resolution_min: 15, horizon_hr: 24, commit_hr: 6, sim_start: "2024-04-08", sim_days: 3}
+strategies: [perfect, p50, stochastic]
+uncertainty: {n_scenarios: 5}

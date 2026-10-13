@@ -1,0 +1,6 @@
+description: The original 800 MW fleet against a ~1,100 MW peak, so some demand goes unserved whatever the plan.
+fleet:
+  - {name: Coal,      fuel: coal, pmin_mw: 130, pmax_mw: 350, heat_rate: 10.5, var_om: 3.0, startup_cost: 13000, ramp_mw_per_hr: 70,  min_up_hr: 8, min_down_hr: 8}
+  - {name: CCGT_1,    fuel: gas,  pmin_mw: 70,  pmax_mw: 200, heat_rate: 7.0,  var_om: 3.0, startup_cost: 4800,  ramp_mw_per_hr: 95,  min_up_hr: 4, min_down_hr: 3}
+  - {name: CCGT_2,    fuel: gas,  pmin_mw: 50,  pmax_mw: 150, heat_rate: 7.6,  var_om: 3.0, startup_cost: 3750,  ramp_mw_per_hr: 90,  min_up_hr: 3, min_down_hr: 3}
+  - {name: Peaker,    fuel: gas,  pmin_mw: 20,  pmax_mw: 100, heat_rate: 11.5, var_om: 5.0, startup_cost: 1200,  ramp_mw_per_hr: 100, min_up_hr: 1, min_down_hr: 1, fast_start: true}

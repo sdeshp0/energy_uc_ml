@@ -1,0 +1,2 @@
+description: Day-ahead commitment that looks 48 hours ahead but locks in only the next 24.
+time: {horizon_hr: 48, commit_hr: 24}

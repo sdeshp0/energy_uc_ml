@@ -1,0 +1,53 @@
+# Reference scenario. Every field is listed here with its default; other
+# presets only list what they change.
+description: Two winter weeks, hourly, day-ahead commitment (24h horizon, re-committed daily).
+
+fleet:
+  # fast_start units can be committed in real time after the day-ahead plan is locked.
+  - {name: Coal,     fuel: coal, pmin_mw: 130, pmax_mw: 350, heat_rate: 10.5, var_om: 3.0, startup_cost: 13000, ramp_mw_per_hr: 70,  min_up_hr: 8, min_down_hr: 8, fast_start: false}
+  - {name: CCGT_1,   fuel: gas,  pmin_mw: 80,  pmax_mw: 250, heat_rate: 7.0,  var_om: 3.0, startup_cost: 5000,  ramp_mw_per_hr: 120, min_up_hr: 4, min_down_hr: 3, fast_start: false}
+  - {name: CCGT_2,   fuel: gas,  pmin_mw: 60,  pmax_mw: 200, heat_rate: 7.6,  var_om: 3.0, startup_cost: 4000,  ramp_mw_per_hr: 100, min_up_hr: 3, min_down_hr: 3, fast_start: false}
+  - {name: Peaker_1, fuel: gas,  pmin_mw: 20,  pmax_mw: 150, heat_rate: 11.5, var_om: 5.0, startup_cost: 1200,  ramp_mw_per_hr: 150, min_up_hr: 1, min_down_hr: 1, fast_start: true}
+  - {name: Peaker_2, fuel: gas,  pmin_mw: 20,  pmax_mw: 150, heat_rate: 12.0, var_om: 5.0, startup_cost: 1200,  ramp_mw_per_hr: 150, min_up_hr: 1, min_down_hr: 1, fast_start: true}
+
+fuel_prices: {coal: 2.2, gas: 4.5}   # $/MMBtu
+
+battery:
+  power_mw: 60
+  energy_mwh: 200
+  round_trip_eff: 0.90
+  soc_min_frac: 0.10
+  soc_max_frac: 0.95
+  soc_init_frac: 0.50
+  cycle_cost: 2.0          # $/MWh in or out
+
+reserves:
+  total_frac: 0.0          # committed headroom as a share of net load
+  spin_frac: 0.0           # headroom deliverable within spin_response_min
+  spin_response_min: 10
+
+penalties:
+  voll: 5000               # $/MWh unserved
+  reserve_shortfall: 1000  # $/MWh of missed reserve
+  overgen: 5000            # $/MWh of excess thermal output
+
+time:
+  resolution_min: 60       # 60, 30, 15, ...
+  horizon_hr: 24           # look-ahead of each solve
+  commit_hr: 24            # locked in before the next solve
+  sim_start: "2024-01-08"
+  sim_days: 14
+
+data:
+  seed: 42
+  train_days: 180          # history before sim_start used to fit forecasts
+  demand_scale_mw: 1000
+  wind_mw: 300
+  solar_mw: 250
+  cold_snap_prob: 0.05     # share of days with +16% demand and a wind drought
+
+uncertainty:
+  n_scenarios: 10          # sampled trajectories for the stochastic strategy
+  calib_frac: 0.25         # last part of the training window, used to measure forecast errors
+
+strategies: [perfect, persistence, p50, conservative, stochastic]

@@ -1,0 +1,2 @@
+description: Base system with gas at $10/MMBtu, which pushes coal to the front of the merit order.
+fuel_prices: {gas: 10.0}

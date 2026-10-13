@@ -1,267 +1,177 @@
-# Energy UC + ML: Forecast-Driven Unit Commitment
+# ucsim: unit commitment under configurable scenarios and time frames
 
-Day-ahead unit commitment for a diversified generation fleet (coal, CCGT,
-gas peaker, wind, solar, battery storage), with renewable and demand input
-from machine-learned quantile forecasters. The project's central finding
-concerns how forecast quality and decision quality relate.
+A small simulator for thermal unit commitment with renewables and battery
+storage. You describe a system and a time frame in a YAML file, pick how
+commitment decisions are made, and the simulator walks forward through
+time: plan, lock in, settle against what actually happened, repeat.
 
-## Headline finding
-
-A forecast that minimizes average error is not the same as a forecast that
-produces good commitment decisions. In unit commitment, the cost of
-*overestimating* available renewables (unserved demand) is far higher than
-the cost of underestimating it (extra thermal capacity committed). The
-median (P50) wind/solar forecast has a one-directional bias: it
-overestimates renewable output by 79.5 MW on average and never
-underestimates. That bias leaves the resulting commitment schedule short
-of thermal capacity, producing a realized cost of $6,682,672 once
-unserved-demand hours are priced in. The conservative P10 quantile
-(average underestimate of 59.2 MW) produces a realized cost of $359,999 —
-close to the perfect-foresight lower bound of $358,274 — despite not being
-the most accurate forecast available: naive persistence (yesterday's
-actuals) has the lowest MAE of the three (40.8 MW vs. P10's 60.1 MW) and
-lands at a comparable $503,223.
-
-The ML forecaster does not beat naive persistence on raw accuracy here.
-Its value comes from letting the commitment decision pick a quantile whose
-bias direction matches what the optimization needs, not from the forecast
-being more accurate.
-
-## Project structure
-
-```
-energy-uc-ml/
-├── src/
-│   ├── data_gen.py           synthetic demand/wind/solar, thermal fleet, price simulation
-│   ├── forecasting.py        quantile (P10/P50/P90) forecasters; single-fit and range-fit variants
-│   ├── unit_commitment.py    single-scenario MILP and two-stage stochastic MILP
-│   ├── scenario.py           shared single-day scenario builder (used by app.py and pages/)
-│   ├── cached_forecasts.py   shared Streamlit cache for the demand/wind/solar forecast fit
-│   ├── scenarios.py          empirical joint (demand x renewable) scenario probabilities
-│   ├── rolling_horizon.py    multi-day walk-forward simulation engine
-│   ├── analysis.py           residual load, sweeps, economics, all plotting
-│   ├── pipeline.py           CLI: forecast-quality comparison (P10 vs P50 vs persistence)
-│   ├── app.py                main Streamlit dashboard
-│   └── pages/
-│       ├── 1_Market_And_Battery_Arbitrage.py   simulated prices, settlement, battery arbitrage
-│       ├── 2_Stochastic_Unit_Commitment.py     the two-stage stochastic hedge
-│       ├── 3_Rolling_Horizon_Simulation.py     multi-day comparison of both approaches
-│       └── 4_Sensitivity_Analysis.py           parameter sweeps, optional stochastic overlay
-├── docs/
-│   └── CODE_WALKTHROUGH.md   full technical walkthrough of the codebase
-├── pyproject.toml            uv / pip project metadata and dependencies
-├── environment.yml           conda alternative
-└── requirements.txt          plain pip alternative
-```
+- **One model.** A Pyomo MILP (solved with HiGHS) covers deterministic and
+  two-stage stochastic commitment; a deterministic solve is one scenario
+  with probability 1.
+- **One engine for every time frame.** A single rolling-horizon loop
+  handles a one-day day-ahead study, two weeks of daily re-commitment, a
+  48-hour look-ahead, or 15-minute intraday re-commitment every few hours.
+- **Scenarios as config.** Fleet, fuel prices, battery, reserves, penalties,
+  time resolution, horizon, re-commit interval, date window, forecast
+  settings and strategies all live in one file.
 
 ## Quickstart
 
-The Streamlit app is the primary entry point. `pipeline.py` is a
-non-interactive CLI that reproduces the headline numbers above.
-
-**uv (recommended):**
-
 ```bash
-uv sync
-uv run streamlit run src/app.py
-uv run python src/pipeline.py
+uv sync                                        # or: pip install -e .
+uv run streamlit run app/Run_Scenario.py       # interactive app
+uv run python -m ucsim scenarios/base.yaml     # command line comparison
+uv run pytest                                  # tests
 ```
 
-`uv sync` produces a `uv.lock` on first run; commit it. For the Phase 2
-extras (Pyomo/HiGHS): `uv sync --extra phase2`.
-
-**conda:**
+Command-line overrides use dotted keys, and `--out` writes CSVs:
 
 ```bash
-conda env create -f environment.yml
-conda activate energy-uc-ml
-streamlit run src/app.py
+python -m ucsim scenarios/base.yaml --set time.sim_days=3 fuel_prices.gas=9 --strategies p50 stochastic
+python -m ucsim scenarios/intraday_15min.yaml --out outputs/intraday
 ```
 
-**pip / venv:**
+## How a simulation runs
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run src/app.py
+For each decision point, every `commit_hr` hours starting at `sim_start`:
+
+1. Build the planning input for the strategy over the next `horizon_hr`.
+2. Solve unit commitment from the current system state (which units are on
+   and for how long, their output, battery charge).
+3. Lock in the first `commit_hr` of commitment. Settle those hours against
+   actual demand and renewables: dispatch is re-optimized, commitment is
+   fixed except for `fast_start` units, which can be called in real time.
+4. Carry the realized state forward.
+
+Costs are always reported from the settlement step, so a strategy that
+plans optimistically can't look cheap on paper.
+
+## Strategies
+
+| Strategy | Plans on |
+|---|---|
+| `perfect` | Actual demand and renewables (lower bound) |
+| `persistence` | Values from the most recent day already known at decision time |
+| `p50` | Median forecast |
+| `conservative` | Demand P90 with renewable P10 |
+| `stochastic` | `n_scenarios` sampled trajectories, one shared commitment |
+
+Forecasts are gradient-boosted quantile models of demand and total
+renewable output, trained once on `train_days` of history before
+`sim_start`. Lag features only use values that are already known when the
+decision is made, so a 48-hour horizon uses lags of at least 2 days.
+
+Stochastic scenarios are the P50 forecast plus forecast-error paths copied
+from a held-out calibration window (the last `calib_frac` of the training
+period, so errors are measured out of sample). Each path is a contiguous
+stretch starting at the same time of day, with demand and renewable errors
+taken together, which keeps autocorrelation and the cold-snap correlation
+between high demand and low wind.
+
+## Model
+
+Per generator: on/off, startup and shutdown binaries; min and max output;
+minimum up and down time, including time already spent in the current
+state when the solve starts; ramp limits with startup/shutdown allowances
+(a unit can jump from 0 to `max(pmin, ramp)` when it starts); spinning
+reserve capped by what the unit can ramp in `spin_response_min`.
+
+System: power balance with curtailment, unserved energy and over-generation
+slacks; battery state of charge with round-trip losses and a per-MWh
+cycling cost; optional total and spinning reserve as a share of net load,
+soft-penalized; a soft end-of-horizon state-of-charge target so the
+battery isn't drained just because a solve ends.
+
+Weather is synthetic: seasonal demand with two daily peaks, AR(1) noise,
+clear-sky solar with clouds, mean-reverting wind, and occasional cold-snap
+days (+16% demand, wind drought). Each series has its own seeded stream
+from a fixed epoch, so a given timestamp always has the same weather no
+matter the window or training length.
+
+## Scenario presets
+
+| File | What it shows |
+|---|---|
+| `base.yaml` | Two winter weeks, hourly, day-ahead. Every field is listed with its default. |
+| `rigid_fleet.yaml` | Same system with no fast-start units, so the day-ahead plan has to cover forecast misses. |
+| `tight_system.yaml` | The original 800 MW fleet against a ~1,100 MW peak. |
+| `gas_price_spike.yaml` | Gas at $10/MMBtu, which reorders the merit order. |
+| `reserves.yaml` | 15% total and 5% spinning reserve. |
+| `summer_week.yaml` | One summer week, strong solar. |
+| `lookahead_48h.yaml` | Solve 48 hours ahead, lock in 24. |
+| `intraday_15min.yaml` | 15-minute steps, re-committed every 6 hours. |
+
+A preset lists only what differs from `base.yaml`. Unknown keys are
+rejected, so typos fail loudly.
+
+## App
+
+- **Run Scenario**: pick a preset, adjust it in the sidebar (time frame,
+  prices, battery, reserves, fleet table, seed), choose a strategy, and see
+  plan vs. actual, the realized dispatch stack, commitment, battery state
+  of charge and a per-day table.
+- **Compare**: run several strategies on the same data, or sweep one
+  parameter (fuel price, battery size, reserve level, look-ahead, value of
+  lost load) for one strategy.
+
+## Results
+
+Four winter weeks from 2024-01-08 (seed 42), hourly, day-ahead commitment
+re-solved daily, the first day being a cold snap. Reproduce with
+`python -m ucsim scenarios/<preset>.yaml --set time.sim_days=28`.
+
+| Strategy | base: total cost | base: unserved MWh | rigid_fleet: total cost | rigid_fleet: unserved MWh | tight_system: total cost | tight_system: unserved MWh |
+|---|---:|---:|---:|---:|---:|---:|
+| Perfect foresight | $9.82M | 0 | $9.82M | 0 | $18.38M | 1,715 |
+| Persistence | $14.95M | 965 | $80.05M | 14,138 | $44.14M | 6,857 |
+| Forecast P50 | $9.98M | 0 | $38.52M | 5,780 | $24.73M | 2,972 |
+| Conservative P90/P10 | $9.99M | 0 | $28.78M | 3,802 | $18.51M | 1,715 |
+| Stochastic (10 scenarios) | $9.95M | 0 | $25.65M | 3,163 | $18.60M | 1,733 |
+
+What this shows:
+
+- **When peakers can start in real time (base), the commitment strategy
+  barely matters.** Every forecast-based strategy is within 2% of perfect
+  foresight; only persistence, which misses the cold snap, sheds load.
+- **When the day-ahead plan has to cover everything (rigid_fleet), it
+  matters a lot.** The stochastic plan cuts unserved energy by 45% versus
+  P50 and total cost by a third. The conservative plan gets most of the way
+  there with far fewer starts, but commits more capacity on every day.
+- **In a short system (tight_system), unserved energy is set by the
+  weather,** and the best a plan can do is not add to it: conservative and
+  stochastic land at the perfect-foresight floor, P50 adds 1,257 MWh.
+- Forecast accuracy and decision quality are different things. Over this
+  window the P50 demand forecast is much better than persistence (MAE 37 vs
+  55 MW) while the P50 renewable forecast is slightly worse (78 vs 73 MW),
+  yet P50 commitment beats persistence everywhere because persistence
+  misses the cold snap entirely.
+
+Penalties use a value of lost load of $5,000/MWh, so total cost is very
+sensitive to it; the Compare page can sweep it.
+
+## Layout
+
 ```
-
-No external MILP solver install is required. `unit_commitment.py` uses
-`scipy.optimize.milp` (HiGHS backend), included with SciPy.
-
-**Imports and IDE setup.** Modules under `src/` import each other by bare
-name (`from data_gen import ...`); `src/` is the import root at runtime,
-since Streamlit puts the entrypoint's directory on `sys.path`. IDEs need
-to be told the same thing, or they flag these imports as unresolved:
-
-- **PyCharm:** right-click `src/` → Mark Directory as → Sources Root
-  (stored per machine in `.idea/`, so it is not part of the repo).
-- **VS Code (Pylance/pyright):** `pyproject.toml` sets
-  `[tool.pyright] extraPaths = ["src"]`.
-
-Do not work around IDE warnings by switching to `src.`-prefixed imports:
-the same file would load twice as two separate modules, splitting the
-shared Streamlit cache and duplicating module-level state.
-
-## What's implemented
-
-1. **Single-scenario MILP** (`unit_commitment.py`). Binary commitment,
-   startup, and shutdown variables per generator per hour; ramp limits;
-   min-up and min-down time; battery state-of-charge dynamics; renewable
-   curtailment. Solved via `scipy.optimize.milp`.
-2. **Quantile forecasting** (`forecasting.py`). Gradient-boosted quantile
-   regression for wind, solar, and demand, using calendar and
-   autoregressive-lag features.
-3. **Planned-vs-realized cost comparison** (`pipeline.py`). Each
-   forecast's commitment schedule is fixed and re-settled against actual
-   demand/renewable output, since comparing planned cost under a forecast
-   is misleading — an optimistic forecast under-commits capacity and looks
-   cheap on paper. This is what produces the headline finding above.
-4. **Fuel-cost decomposition and price simulation** (`data_gen.py`).
-   Generator cost as heat rate × fuel price + variable O&M; an exogenous
-   merit-order-derived electricity price for settlement reporting.
-5. **Battery arbitrage** (`unit_commitment.py`, optional `price` argument).
-   A price term layered on top of production-cost minimization, evaluated
-   independently of the forecast-uncertainty story.
-6. **Two-stage stochastic unit commitment** (`unit_commitment.py`,
-   `StochasticUnitCommitmentModel`). One shared commitment schedule across
-   nine (demand × renewable) scenarios, with scenario-specific recourse
-   dispatch. Scenario probabilities are estimated empirically from paired
-   historical forecast errors (`scenarios.py`), not assumed independent.
-7. **Rolling-horizon simulation** (`rolling_horizon.py`). Multi-day
-   walk-forward comparison of committing on the P50 forecast alone versus
-   the stochastic hedge, with battery state of charge and generator status
-   carried forward across day boundaries.
-8. **Sensitivity analysis** (`analysis.py`, page 4). Parameter sweeps over
-   fuel prices and battery sizing, with an optional stochastic-hedge
-   overlay.
-9. **Reserve requirements** (`unit_commitment.py`, both models). Optional
-   total and spinning reserve margins, sized against residual load (not
-   raw demand, since this fleet's thermal capacity is often below raw
-   demand by design). Spinning reserve additionally caps each unit's
-   contribution by its ramp rate within a 10-minute response window.
-   Shortfalls are a penalized slack, not a hard constraint, so a tight
-   requirement degrades gracefully instead of making the MILP infeasible.
-   Both default to 0% (disabled), so every existing result is unaffected
-   unless explicitly turned on via the app's sidebar.
-
-Full detail on each component, including the MILP formulations, is in
-`docs/CODE_WALKTHROUGH.md`.
-
-## Selected results
-
-**Stochastic hedge vs. committing on P50 alone.** Committing based on the
-P50 scenario, then facing a high-demand/low-renewable scenario: 186.8 MW
-unserved demand, $8,932,848 cost. The same bad scenario, same fleet, with
-the stochastic hedge's commitment instead: 0 MW unserved, $360,967. The
-hedge costs more in expectation across all nine scenarios (an insurance
-premium — more thermal capacity committed than P50 alone would choose) in
-exchange for eliminating the worst-case failure mode.
-
-**Empirical vs. independence-assumed scenario probabilities.**
-Demand and renewable forecast errors have measured correlation −0.13 in
-this dataset (via a deliberate correlated "cold snap" shock in
-`data_gen.py`; without it the two are independent by construction and
-there is nothing for this comparison to find). The high-demand/
-low-renewable joint probability is 0.124 empirically vs. 0.111 assuming
-independence — the independence assumption understates exactly the
-scenario a hedge is meant to protect against.
-
-**Battery arbitrage.** Adding a price incentive to the battery's objective
-changed production cost by $0 while increasing battery P&L from $2,207 to
-$2,616 (+18.5%) on one representative day — a contained shift, not a
-change in overall system behavior.
-
-**Sensitivity ranges.** Coal price swept $1–8/MMBtu changes total cost by
-147%. Battery power swept 0–150 MW shows diminishing returns past
-approximately 60–65 MW for a 200 MWh battery — a property of the
-power-to-energy ratio, not a tuning artifact.
-
-**Rolling horizon, 14-day default window.** P50-only: 8 of 14 days with
-unserved demand, 458.7 MWh total unserved, $9,651,519 total cost.
-Stochastic hedge: 1 of 14 days with unserved demand, 0.8 MWh total
-unserved, $4,986,721 total cost — lower on both reliability and aggregate
-cost over the window, despite costing a premium on any single day
-analyzed in isolation.
-
-**Reserve requirements.** On a representative day, adding a 15% total
-reserve margin raised planned cost by 1.8% and committed extra capacity
-in three additional hours, with zero shortfall (the requirement was
-satisfiable). Adding an 8% spinning margin on top raised cost further and
-produced a small (0.4 MW) spinning-reserve shortfall — spinning reserve
-is the tighter constraint, since it's capped by ramp rate, not just
-headroom. In a 3-scenario stochastic hedge, a 15%/8% requirement produced
-shortfall only in the worst (high-demand/low-renewable) scenario; the
-other two scenarios held the full margin with room to spare.
-
-## Performance
-
-The demand/wind/solar quantile forecast fit is the dominant cost on every
-page that needs one (roughly 20s at the original setting). Two changes
-address this:
-
-- **`n_estimators` tuning** (`forecasting.py`). The original 300
-  estimators per GBM were overfitting on ~4,800 training rows: reducing to
-  100 cut fit time roughly 3x (20s → 7s for all three targets) while
-  *improving* out-of-sample MAE on every target tested. This is not a
-  speed/accuracy tradeoff.
-- **Shared caching across pages** (`cached_forecasts.py`). `app.py`, page
-  1's fallback, and page 2 previously each fit their own copy of the same
-  models independently. A single `@st.cache_data`-decorated function,
-  imported by all three, means the first page visited in a session pays
-  the fit cost once; subsequent pages reuse the cached result for the same
-  training-window setting.
-
-Page 4 (no forecasting; MILP solves only) and page 3 (fits once across a
-larger multi-day window, not shareable with the single-next-day cache)
-were not restructured, but page 3 benefits automatically from the
-`n_estimators` change — its default 14-day window dropped from ~47s to
-~32s.
+src/ucsim/
+  config.py       Scenario dataclasses, YAML loading, presets
+  data.py         synthetic demand / wind / solar at any resolution
+  forecast.py     quantile forecasts and persistence
+  uncertainty.py  out-of-sample error pool and scenario sampling
+  model.py        the UC MILP (Pyomo + HiGHS)
+  simulate.py     rolling-horizon engine, costs, summaries
+  __main__.py     command line
+app/              Streamlit app (Run_Scenario.py, pages/2_Compare.py)
+scenarios/        YAML presets
+tests/
+```
 
 ## Limitations
 
-- The shutdown-indicator variable (`v` in `unit_commitment.py`) is
-  correctly constrained for MILP feasibility but is not a reliable
-  standalone signal on hours where the unit was already off.
-  `analysis.py`'s Gantt chart derives on/off transitions from the
-  commitment variable directly.
-- Battery charge/discharge has no mutual-exclusivity constraint; relies on
-  cost structure to discourage simultaneous charge and discharge.
-- Fleet capacities are hand-tuned so the peaker has a visible, occasional
-  role (engages on 32% of days); not derived from a capacity-planning
-  study.
-- The simulated electricity price (`simulate_price_series`) is an
-  exogenous merit-order proxy, not the shadow price of any UC solve —
-  deliberate, so the battery has a genuine external signal to react to.
-- Joint scenario probabilities are estimated from in-sample (not
-  walk-forward) historical forecast errors. Error magnitudes are
-  optimistic; the correlation between demand and renewable errors is
-  preserved correctly.
-- Combined wind+solar quantile forecasts are computed by summing matching
-  quantile levels, which carries its own independence assumption between
-  wind and solar specifically — separate from the demand-vs-renewable
-  correlation fix in `scenarios.py`.
-- No transmission constraints, no reserve-margin requirements, single bus.
-- The sensitivity page's stochastic overlay uses a simplified,
-  independence-weighted scenario set (page 4) rather than the empirically
-  estimated probabilities used elsewhere (`scenarios.py`, pages 2–3),
-  since its representative day is not anchored to a specific forecast
-  window.
-
-## Remaining roadmap
-
-- **EV charging as flexible demand.** A controllable load the optimizer
-  can shift within a charging window, alongside the battery.
-- **Decision-focused learning.** Train the forecast model's loss on
-  downstream dispatch cost rather than quantile accuracy.
-- **Walk-forward backtesting.** Replace the in-sample error estimates
-  used for joint scenario probabilities with true rolling retraining.
-- **Real data.** Swap the synthetic generator for NREL/EIA data (the
-  swap-in path is documented in `data_gen.py`).
-- **Disk-based precomputation.** The shared cache (`cached_forecasts.py`)
-  eliminates redundant fits within a running session but still pays the
-  full cost on a fresh process start. Precomputing and serializing the
-  default scenario's forecast fit to disk would remove that cold-start
-  cost too; not implemented, since the underlying data generation's
-  determinism (fixed-seed RNG at module import) would need care to keep
-  a disk cache from silently going stale against code changes.
+- Single bus, no transmission.
+- Fast-start units are planned as first-stage decisions in the stochastic
+  model but are free in settlement, so the hedge is slightly conservative.
+- Forecast models are trained once per run, not retrained as the
+  simulation walks forward.
+- Data is synthetic. `data.generate` returns a plain time-indexed frame
+  (`demand_mw`, `wind_mw`, `solar_mw`, `renewable_mw`), so real series
+  (EIA, ENTSO-E, renewables.ninja) can replace it.

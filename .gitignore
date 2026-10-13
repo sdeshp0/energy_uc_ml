@@ -10,6 +10,5 @@ wheels/
 .venv
 
 # Generated artifacts
-data/*.csv
-outputs/*.png
-outputs/*.csv
+
+outputs/
