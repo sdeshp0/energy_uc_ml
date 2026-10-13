@@ -5,6 +5,7 @@
 
 import streamlit as st
 from common import (
+    STRATEGY_DESCRIPTIONS,
     STRATEGY_LABELS,
     commitment_chart,
     describe,
@@ -14,6 +15,7 @@ from common import (
     run_cached,
     scenario_sidebar,
     soc_chart,
+    strategy_guide,
 )
 
 st.set_page_config(page_title="Unit commitment simulator", layout="wide")
@@ -22,8 +24,9 @@ st.title("Unit commitment simulator")
 sc = scenario_sidebar()
 strategy = st.radio("Commitment strategy", list(STRATEGY_LABELS), format_func=STRATEGY_LABELS.get,
                     index=list(STRATEGY_LABELS).index("p50"), horizontal=True)
-st.caption(describe(sc) + ". Commitment is planned on the strategy's view of demand and renewables, "
-           "then settled against what actually happened.")
+st.info(STRATEGY_DESCRIPTIONS[strategy])
+strategy_guide()
+st.caption(describe(sc))
 
 with st.spinner("Forecasting and solving..."):
     res = run_cached(sc, strategy)
