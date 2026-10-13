@@ -1,0 +1,2 @@
+description: Base system holding 15% total and 5% spinning reserve against net load.
+reserves: {total_frac: 0.15, spin_frac: 0.05}
