@@ -3,6 +3,7 @@
     streamlit run app/Run_Scenario.py
 """
 
+import drilldown
 import streamlit as st
 from common import (
     STRATEGY_DESCRIPTIONS,
@@ -57,6 +58,10 @@ with left:
 with right:
     st.subheader("Battery state of charge")
     st.altair_chart(soc_chart(view), width="stretch")
+
+st.subheader("Inside the fleet")
+st.caption("Drill into each part of the system for the period selected above.")
+drilldown.render(view, sc)
 
 st.subheader("By day")
 st.dataframe(res.daily().style.format({"total_cost": "${:,.0f}", "unserved_mwh": "{:,.1f}",

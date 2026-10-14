@@ -167,6 +167,8 @@ def run(scenario: Scenario, strategy: str, prepared: Prepared | None = None) -> 
         frame = to_frame(settled, scenario, actual_idx)
         frame["demand"] = actual[0]["demand"]
         frame["renewable"] = actual[0]["renewable"]
+        frame["wind"] = prep.df.loc[actual_idx, "wind_mw"].to_numpy()
+        frame["solar"] = prep.df.loc[actual_idx, "solar_mw"].to_numpy()
         frame["plan_demand"] = probs @ np.array([s["demand"][:commit] for s in plan_in])
         frame["plan_renewable"] = probs @ np.array([s["renewable"][:commit] for s in plan_in])
         frames.append(frame)

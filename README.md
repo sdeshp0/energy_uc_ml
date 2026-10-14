@@ -109,7 +109,10 @@ rejected, so typos fail loudly.
 - **Run Scenario**: pick a preset, adjust it in the sidebar (time frame,
   prices, battery, reserves, fleet table, seed), choose a strategy, and see
   plan vs. actual, the realized dispatch stack, commitment, battery state
-  of charge and a per-day table.
+  of charge and a per-day table. "Inside the fleet" drills into each part
+  of the system: per-unit output, ramping and costs with the merit order;
+  wind and solar availability, curtailment and plan error; battery cycling
+  and when it charges; and where the money goes by day, unit and hour.
 - **Compare**: run several strategies on the same data, or sweep one
   parameter (fuel price, battery size, reserve level, look-ahead, value of
   lost load) for one strategy.
