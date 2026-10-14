@@ -3,7 +3,7 @@
 import altair as alt
 import pandas as pd
 import streamlit as st
-from common import STRATEGY_LABELS, describe, run_cached, scenario_sidebar, strategy_guide
+from common import STRATEGY_LABELS, describe, legend_highlight, run_cached, scenario_sidebar, strategy_guide, zoomable
 
 st.set_page_config(page_title="Compare", layout="wide")
 st.title("Compare")
@@ -65,14 +65,19 @@ costs = table[["operating_cost", "penalty_cost"]].rename(
 left, right = st.columns(2)
 left.altair_chart(alt.Chart(costs).mark_bar().encode(
     x=alt.X("run:N", sort=order, title=None), y=alt.Y("cost:Q", title="Cost ($)"),
-    color=alt.Color("part:N", title=None, legend=alt.Legend(orient="top"))).properties(
+    color=alt.Color("part:N", title=None, legend=alt.Legend(orient="top")),
+    tooltip=["run:N", "part:N", alt.Tooltip("cost:Q", format="$,.0f")]).properties(
     title="Total cost", height=300), width="stretch")
 right.altair_chart(alt.Chart(table.reset_index()).mark_bar().encode(
-    x=alt.X("run:N", sort=order, title=None), y=alt.Y("unserved_mwh:Q", title="MWh")).properties(
+    x=alt.X("run:N", sort=order, title=None), y=alt.Y("unserved_mwh:Q", title="MWh"),
+    tooltip=["run:N", alt.Tooltip("unserved_mwh:Q", format=",.1f")]).properties(
     title="Unserved energy", height=300), width="stretch")
 
 daily = pd.concat({k: r.daily()["total_cost"].cumsum() for k, r in results.items()}, names=["run", "date"])
-st.altair_chart(alt.Chart(daily.rename("cost").reset_index()).mark_line(point=True).encode(
+pick = legend_highlight("run")
+st.altair_chart(zoomable(alt.Chart(daily.rename("cost").reset_index()).mark_line(point=True, clip=True).encode(
     x=alt.X("date:T", title=None), y=alt.Y("cost:Q", title="Cumulative cost ($)"),
-    color=alt.Color("run:N", sort=order, title=None, legend=alt.Legend(orient="top"))).properties(
-    title="Cumulative cost", height=300), width="stretch")
+    color=alt.Color("run:N", sort=order, title=None, legend=alt.Legend(orient="top")),
+    opacity=alt.condition(pick, alt.value(1), alt.value(0.15)),
+    tooltip=["run:N", "date:T", alt.Tooltip("cost:Q", format="$,.0f")]).add_params(pick)).properties(
+    title="Cumulative cost (scroll to zoom, click legend to highlight)", height=300), width="stretch")

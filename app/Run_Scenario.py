@@ -16,6 +16,7 @@ from common import (
     scenario_sidebar,
     soc_chart,
     strategy_guide,
+    window_picker,
 )
 
 st.set_page_config(page_title="Unit commitment simulator", layout="wide")
@@ -39,19 +40,23 @@ c[2].metric("Penalties", money(s["penalty_cost"]), help="Unserved energy, missed
 c[3].metric("Unserved energy", f"{s['unserved_mwh']:,.1f} MWh")
 c[4].metric("Unit starts", s["starts"])
 
+st.caption("Charts are interactive: scroll to zoom in or out on time, drag to pan, double-click to reset, "
+           "and click a legend entry to highlight it. The slider narrows every chart at once.")
+view = window_picker(ts)
+
 st.subheader("Plan vs. actual")
-st.altair_chart(forecast_chart(ts), width="stretch")
+st.altair_chart(forecast_chart(view), width="stretch")
 
 st.subheader("Realized dispatch")
-st.altair_chart(dispatch_chart(ts, sc), width="stretch")
+st.altair_chart(dispatch_chart(view, sc), width="stretch")
 
 left, right = st.columns([3, 2])
 with left:
     st.subheader("Commitment")
-    st.altair_chart(commitment_chart(ts, sc), width="stretch")
+    st.altair_chart(commitment_chart(view, sc), width="stretch")
 with right:
     st.subheader("Battery state of charge")
-    st.altair_chart(soc_chart(ts), width="stretch")
+    st.altair_chart(soc_chart(view), width="stretch")
 
 st.subheader("By day")
 st.dataframe(res.daily().style.format({"total_cost": "${:,.0f}", "unserved_mwh": "{:,.1f}",

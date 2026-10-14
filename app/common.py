@@ -123,19 +123,55 @@ def describe(sc: Scenario) -> str:
 
 
 # ---------------------------------------------------------------- charts
+# Every time-series chart zooms and pans along time: scroll to zoom, drag to
+# pan, double-click to reset. Legends are clickable to highlight one series.
+THERMAL_COLORS = ["#5b5b5b", "#1f77b4", "#6baed6", "#e6550d", "#fd8d3c", "#9e9ac8", "#bcbddc", "#8c6d31"]
+
+
+def unit_colors(sc: Scenario) -> dict[str, str]:
+    return {g.name: THERMAL_COLORS[i % len(THERMAL_COLORS)] for i, g in enumerate(sc.fleet)}
+
+
+def zoomable(chart):
+    """Scroll/drag zoom on the time axis only, so values stay readable."""
+    return chart.add_params(alt.selection_interval(bind="scales", encodings=["x"]))
+
+
+def legend_highlight(field: str):
+    return alt.selection_point(fields=[field], bind="legend")
+
+
+def time_x(title=None):
+    return alt.X("timestamp:T", title=title, axis=alt.Axis(labelOverlap=True))
+
+
+def window_picker(ts: pd.DataFrame, key: str = "window") -> pd.DataFrame:
+    """Date-range slider applied to every chart on the page."""
+    start, end = ts.index[0].to_pydatetime(), ts.index[-1].to_pydatetime()
+    if start == end:
+        return ts
+    lo, hi = st.slider("Show period", min_value=start, max_value=end, value=(start, end),
+                       format="MMM D, HH:mm", key=key,
+                       help="Narrows every chart below. You can also scroll on a chart to zoom, "
+                            "drag to pan, and double-click to reset.")
+    return ts.loc[lo:hi]
+
+
 def _long(df: pd.DataFrame, cols: dict[str, str], value="MW") -> pd.DataFrame:
-    out = df[list(cols)].rename(columns=cols).reset_index().melt("timestamp", var_name="series", value_name=value)
-    return out
+    return df[list(cols)].rename(columns=cols).reset_index().melt("timestamp", var_name="series", value_name=value)
 
 
 def forecast_chart(ts: pd.DataFrame) -> alt.Chart:
     data = _long(ts, {"demand": "Demand (actual)", "plan_demand": "Demand (plan)",
                       "renewable": "Renewables (actual)", "plan_renewable": "Renewables (plan)"})
-    return alt.Chart(data).mark_line().encode(
-        x=alt.X("timestamp:T", title=None), y="MW:Q",
+    pick = legend_highlight("series")
+    return zoomable(alt.Chart(data).mark_line(clip=True).encode(
+        x=time_x(), y="MW:Q",
         color=alt.Color("series:N", title=None, legend=alt.Legend(orient="top")),
         strokeDash=alt.condition("indexof(datum.series, 'plan') >= 0", alt.value([4, 3]), alt.value([1, 0])),
-    ).properties(height=260)
+        opacity=alt.condition(pick, alt.value(1), alt.value(0.15)),
+        tooltip=["timestamp:T", "series:N", alt.Tooltip("MW:Q", format=",.0f")],
+    ).add_params(pick)).properties(height=260)
 
 
 def dispatch_chart(ts: pd.DataFrame, sc: Scenario) -> alt.LayerChart:
@@ -146,38 +182,42 @@ def dispatch_chart(ts: pd.DataFrame, sc: Scenario) -> alt.LayerChart:
     df["Battery"] = ts["discharge"] - ts["charge"]
     df["Unserved"] = ts["unserved"]
     order = list(df.columns)
-    thermal = ["#5b5b5b", "#1f77b4", "#6baed6", "#e6550d", "#fd8d3c", "#9e9ac8", "#bcbddc", "#8c6d31"]
-    colors = ["#31a354"] + [thermal[i % len(thermal)] for i in range(len(sc.fleet))] + ["#e7ba52", "#d62728"]
+    colors = ["#31a354"] + list(unit_colors(sc).values()) + ["#e7ba52", "#d62728"]
     data = df.reset_index().melt("timestamp", var_name="source", value_name="MW")
     data["order"] = data["source"].map(order.index)
-    area = alt.Chart(data).mark_area(interpolate="step-after").encode(
-        x=alt.X("timestamp:T", title=None), y=alt.Y("MW:Q", stack=True),
+    pick = legend_highlight("source")
+    area = zoomable(alt.Chart(data).mark_area(interpolate="step-after", clip=True).encode(
+        x=time_x(), y=alt.Y("MW:Q", stack=True, title="MW"),
         color=alt.Color("source:N", sort=order, title=None, legend=alt.Legend(orient="top"),
                         scale=alt.Scale(domain=order, range=colors)),
-        order="order:Q", tooltip=["timestamp:T", "source:N", alt.Tooltip("MW:Q", format=",.0f")],
-    )
-    line = alt.Chart(ts.reset_index()).mark_line(color="black", strokeDash=[4, 2], interpolate="step-after").encode(
-        x="timestamp:T", y=alt.Y("demand:Q", title="MW"))
+        order="order:Q", opacity=alt.condition(pick, alt.value(0.9), alt.value(0.15)),
+        tooltip=["timestamp:T", "source:N", alt.Tooltip("MW:Q", format=",.0f")],
+    ).add_params(pick))
+    line = alt.Chart(ts.reset_index()).mark_line(color="black", strokeDash=[4, 2], interpolate="step-after", clip=True).encode(
+        x="timestamp:T", y="demand:Q", tooltip=["timestamp:T", alt.Tooltip("demand:Q", format=",.0f")])
     return (area + line).properties(height=320)
 
 
 def commitment_chart(ts: pd.DataFrame, sc: Scenario) -> alt.Chart:
     names = [g.name for g in sc.fleet]
+    colors = unit_colors(sc)
     df = ts[[f"u_{n}" for n in names]].rename(columns=lambda c: c[2:])
     data = df.reset_index().melt("timestamp", var_name="unit", value_name="on")
     data = data[data["on"] > 0.5]
     step = pd.Timedelta(minutes=sc.time.resolution_min)
     data["end"] = data["timestamp"] + step
-    return alt.Chart(data).mark_rect().encode(
-        x=alt.X("timestamp:T", title=None), x2="end:T", y=alt.Y("unit:N", sort=names, title=None),
-        color=alt.Color("unit:N", legend=None),
-    ).properties(height=30 * len(names) + 20)
+    return zoomable(alt.Chart(data).mark_rect(clip=True).encode(
+        x=time_x(), x2="end:T", y=alt.Y("unit:N", sort=names, title=None),
+        color=alt.Color("unit:N", legend=None, scale=alt.Scale(domain=names, range=[colors[n] for n in names])),
+        tooltip=["unit:N", "timestamp:T"],
+    )).properties(height=30 * len(names) + 20)
 
 
 def soc_chart(ts: pd.DataFrame) -> alt.Chart:
-    return alt.Chart(ts.reset_index()).mark_line(interpolate="step-after").encode(
-        x=alt.X("timestamp:T", title=None), y=alt.Y("soc:Q", title="Battery (MWh)"),
-    ).properties(height=180)
+    return zoomable(alt.Chart(ts.reset_index()).mark_line(interpolate="step-after", clip=True).encode(
+        x=time_x(), y=alt.Y("soc:Q", title="Battery (MWh)"),
+        tooltip=["timestamp:T", alt.Tooltip("soc:Q", format=",.0f")],
+    )).properties(height=180)
 
 
 def money(x: float) -> str:
